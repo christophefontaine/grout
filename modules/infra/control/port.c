@@ -197,8 +197,10 @@ static int port_configure(struct iface_info_port *p) {
 			return errno_log(-ret, "rte_eth_tx_queue_setup");
 	}
 
+	if(strcmp(info.driver_name, "net_tun") == 0) {
+		p->is_tun = true;
+	}
 	port_queue_assign(p);
-
 	p->configured = true;
 
 	return 0;
@@ -299,6 +301,9 @@ int iface_port_reconfig(
 
 	if (stopped && (ret = rte_eth_dev_start(p->port_id)) < 0)
 		return errno_log(-ret, "rte_eth_dev_start");
+
+	if(p->is_tun)
+		iface->type_id = GR_IFACE_TYPE_TUN;
 
 	iface_event_notify(IFACE_EVENT_PORT_POST_RECONFIG, iface);
 
@@ -723,6 +728,16 @@ static struct iface_type iface_type_port = {
 	.to_api = port_to_api,
 };
 
+static struct iface_type iface_type_tun = {
+	.id = GR_IFACE_TYPE_TUN,
+	.name = "tun",
+	.info_size = sizeof(struct iface_info_port),
+	.init = iface_port_init,
+	.reconfig = iface_port_reconfig,
+	.fini = iface_port_fini,
+	.to_api = port_to_api,
+};
+
 static struct gr_module port_module = {
 	.name = "iface port",
 	.init = port_init,
@@ -731,5 +746,6 @@ static struct gr_module port_module = {
 
 RTE_INIT(port_constructor) {
 	iface_type_register(&iface_type_port);
+	iface_type_register(&iface_type_tun);
 	gr_register_module(&port_module);
 }

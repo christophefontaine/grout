@@ -12,6 +12,7 @@
 struct rx_port_queue {
 	uint16_t port_id;
 	uint16_t rxq_id;
+	bool is_tun;
 };
 
 struct rx_node_queues {

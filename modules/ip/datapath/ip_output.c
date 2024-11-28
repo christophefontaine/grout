@@ -10,6 +10,7 @@
 #include <gr_ip4_datapath.h>
 #include <gr_log.h>
 #include <gr_mbuf.h>
+#include <gr_port.h>
 #include <gr_trace.h>
 
 #include <rte_byteorder.h>
@@ -24,6 +25,7 @@ enum {
 	NO_ROUTE,
 	ERROR,
 	QUEUE_FULL,
+	PORT_OUTPUT,
 	EDGE_COUNT,
 };
 
@@ -100,6 +102,13 @@ ip_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 		// Determine what is the next node based on the output interface type
 		// By default, it will be eth_output unless another output node was registered.
 		edge = edges[iface->type_id];
+		if (edge == PORT_OUTPUT) {
+			const struct iface_info_port *port;
+			port = (const struct iface_info_port *)iface->info;
+			mbuf->port = port->port_id;
+			goto next;
+		}
+
 		if (edge != ETH_OUTPUT)
 			goto next;
 
@@ -161,6 +170,11 @@ next:
 	return sent;
 }
 
+static int output_node_init(const struct rte_graph *, struct rte_node *) {
+	edges[GR_IFACE_TYPE_TUN] = PORT_OUTPUT;
+	return 0;
+}
+
 static struct rte_node_register output_node = {
 	.name = "ip_output",
 	.process = ip_output_process,
@@ -169,8 +183,10 @@ static struct rte_node_register output_node = {
 		[ETH_OUTPUT] = "eth_output",
 		[NO_ROUTE] = "ip_error_dest_unreach",
 		[ERROR] = "ip_output_error",
+		[PORT_OUTPUT] = "port_tx",
 		[QUEUE_FULL] = "arp_queue_full",
 	},
+	.init = output_node_init,
 };
 
 static struct gr_node_info info = {

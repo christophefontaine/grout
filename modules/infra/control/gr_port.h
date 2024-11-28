@@ -41,6 +41,7 @@ struct __rte_aligned(alignof(void *)) iface_info_port {
 	uint32_t pool_size;
 	struct mac_filter ucast_filter;
 	struct mac_filter mcast_filter;
+	bool is_tun;
 };
 
 uint32_t port_get_rxq_buffer_us(uint16_t port_id, uint16_t rxq_id);
