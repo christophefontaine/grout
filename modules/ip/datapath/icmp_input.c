@@ -40,7 +40,7 @@ icmp_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 		icmp = rte_pktmbuf_mtod(mbuf, struct rte_icmp_hdr *);
 		ip_data = ip_local_mbuf_data(mbuf);
 
-		if (ip_data->len < ICMP_MIN_SIZE || (uint16_t)~rte_raw_cksum(icmp, ip_data->len)) {
+		if (ip_data->len < ICMP_MIN_SIZE || rte_raw_cksum(icmp, ip_data->len) == 0) {
 			edge = INVALID;
 			goto next;
 		}
