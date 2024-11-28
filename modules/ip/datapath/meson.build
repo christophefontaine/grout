@@ -13,5 +13,6 @@ src += files(
   'ip_input.c',
   'ip_local.c',
   'ip_output.c',
+  'ip_redirect.c',
 )
 inc += include_directories('.')

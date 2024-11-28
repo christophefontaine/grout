@@ -206,4 +206,11 @@ struct gr_ip4_icmp_recv_resp {
 	clock_t response_time;
 };
 
+#define GR_IP4_REDIRECT_ALL REQUEST_TYPE(GR_IP4_MODULE, 0x0030)
+struct gr_ip4_redirect_all_req {
+	uint16_t iface_id;
+};
+
+// struct gr_ip4_redirect_all_resp { };
+
 #endif

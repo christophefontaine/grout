@@ -5,6 +5,7 @@ src += files(
   'address.c',
   'icmp.c',
   'nexthop.c',
+  'redirect.c',
   'route.c',
 )
 inc += include_directories('.')

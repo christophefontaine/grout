@@ -67,4 +67,5 @@ int icmp_local_send(
 
 void icmp_input_register_callback(uint8_t icmp_type, control_output_cb_t cb);
 
+const struct iface *gr_get_tun_redirect(void);
 #endif
