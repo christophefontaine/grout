@@ -642,17 +642,20 @@ static void link_event_cb(evutil_socket_t, short /*what*/, void * /*priv*/) {
 			if (rte_eth_link_get_nowait(qmap->port_id, &link) < 0) {
 				LOG(INFO, "%s: link status down", iface->name);
 				iface->state &= ~GR_IFACE_S_RUNNING;
+				iface_event_notify(IFACE_EVENT_STATUS_DOWN, iface);
 				continue;
 			}
 			if (link.link_status == RTE_ETH_LINK_UP) {
 				if (!(iface->state & GR_IFACE_S_RUNNING)) {
 					LOG(INFO, "%s: link status up", iface->name);
 					iface->state |= GR_IFACE_S_RUNNING;
+					iface_event_notify(IFACE_EVENT_STATUS_UP, iface);
 				}
 			} else {
 				if (iface->state & GR_IFACE_S_RUNNING) {
 					LOG(INFO, "%s: link status down", iface->name);
 					iface->state &= ~GR_IFACE_S_RUNNING;
+					iface_event_notify(IFACE_EVENT_STATUS_DOWN, iface);
 				}
 				continue;
 			}
