@@ -86,6 +86,7 @@ struct iface *iface_next(uint16_t type_id, const struct iface *prev);
 
 struct iface *get_vrf_iface(uint16_t vrf_id);
 struct iface *iface_loopback_create(uint16_t vrf_id);
+int iface_loopback_delete(uint16_t vrf_id);
 
 #define IFACE_EVENTS                                                                               \
 	IFACE_EVENT(UNKNOWN), IFACE_EVENT(POST_ADD), IFACE_EVENT(PRE_REMOVE),                      \
