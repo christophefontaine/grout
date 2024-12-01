@@ -25,7 +25,6 @@
 #define TUN_TAP_DEV_PATH "/dev/net/tun"
 
 static struct rte_mempool *loopback_pool;
-extern control_input_t control_to_loop_input;
 static struct event_base *global_ev_base;
 
 struct iface_info_loop {
@@ -86,7 +85,7 @@ static void iface_loopback_poll(evutil_socket_t, short, void *ev_iface) {
 	e->iface = iface;
 	e->eth_dst = ETH_DST_LOCAL;
 
-	post_to_stack(control_to_loop_input, mbuf);
+	post_to_stack(loopback_get_control_id(), mbuf);
 
 end:
 	event_add(loop->ev, NULL);
