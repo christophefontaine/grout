@@ -18,7 +18,6 @@
 #include <stdint.h>
 
 GR_MBUF_PRIV_DATA_TYPE(ip6_output_mbuf_data, {
-	const struct iface *input_iface;
 	struct nexthop6 *nh;
 });
 
@@ -33,7 +32,6 @@ GR_MBUF_PRIV_DATA_TYPE(ip6_local_mbuf_data, {
 	uint16_t len;
 	uint8_t hop_limit;
 	uint8_t proto;
-	const struct iface *input_iface;
 });
 
 void ip6_input_local_add_proto(uint8_t proto, const char *next_node);
