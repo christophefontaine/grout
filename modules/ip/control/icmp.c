@@ -8,14 +8,16 @@
 #include <gr_ip4_control.h>
 #include <gr_ip4_datapath.h>
 #include <gr_log.h>
+#include <gr_loopback.h>
 #include <gr_module.h>
 #include <gr_queue.h>
+#include <gr_vec.h>
 
-#include <rte_atomic.h>
 #include <rte_icmp.h>
 #include <rte_ip.h>
 #include <rte_ring.h>
 
+#include <stdatomic.h>
 #include <time.h>
 
 struct icmp_queue_item {
@@ -25,6 +27,9 @@ struct icmp_queue_item {
 
 static STAILQ_HEAD(, icmp_queue_item) icmp_queue = STAILQ_HEAD_INITIALIZER(icmp_queue);
 static struct rte_mempool *pool;
+static uint16_t *inflight_requests;
+// Global id which is used to differentiate between api clients
+static _Atomic uint16_t icmp_ident = 0;
 
 static void icmp_queue_pop(struct icmp_queue_item *i, bool free_mbuf) {
 	STAILQ_REMOVE(&icmp_queue, i, icmp_queue_item, next);
@@ -34,10 +39,35 @@ static void icmp_queue_pop(struct icmp_queue_item *i, bool free_mbuf) {
 }
 
 // Callback invoked by control plane for each ICMP packet received for a local address.
-// The packet is added at the end of a linked list.
+// The packet is added at the end of a linked list if the sequence id matches.
 static void icmp_input_cb(struct rte_mbuf *m) {
+	struct rte_icmp_hdr *icmp;
 	struct icmp_queue_item *i;
 	void *data;
+
+	icmp = rte_pktmbuf_mtod(m, struct rte_icmp_hdr *);
+
+	if (icmp->icmp_type != RTE_ICMP_TYPE_ECHO_REPLY) {
+		struct rte_ipv4_hdr *ip = PAYLOAD(icmp);
+		// RFC 792: Destination Unreachable or Time Exceeded
+		// The icmp_seq_nb and icmp_ident fields are unused.
+		// Jump to the next header which contains the original IP header
+		if (ip->next_proto_id != IPPROTO_ICMP)
+			goto err;
+
+		icmp = PAYLOAD(ip);
+		if (icmp->icmp_type != RTE_ICMP_TYPE_ECHO_REQUEST)
+			goto err;
+	}
+
+	if (rte_be_to_cpu_16(icmp->icmp_ident) != (icmp_ident - 1)) {
+		struct mbuf_data *d = mbuf_data(m);
+		// This looks like a packet to the management plane
+		rte_pktmbuf_prepend(m, sizeof(struct rte_ipv4_hdr));
+		d->iface = get_vrf_iface(d->iface->vrf_id);
+		loopback_tx(m);
+		return;
+	}
 
 	while (rte_mempool_get(pool, &data) < 0)
 		icmp_queue_pop(STAILQ_FIRST(&icmp_queue), true);
@@ -45,6 +75,10 @@ static void icmp_input_cb(struct rte_mbuf *m) {
 	i = data;
 	i->mbuf = m;
 	STAILQ_INSERT_TAIL(&icmp_queue, i, next);
+	return;
+
+err:
+	rte_pktmbuf_free(m);
 }
 
 // Search for the oldest ICMP response matching the given identifier.
@@ -57,9 +91,6 @@ static struct rte_mbuf *get_icmp_response(uint16_t id) {
 		struct rte_icmp_hdr *icmp = rte_pktmbuf_mtod(i->mbuf, struct rte_icmp_hdr *);
 
 		if (icmp->icmp_type != RTE_ICMP_TYPE_ECHO_REPLY) {
-			// RFC 792: Destination Unreachable or Time Exceeded
-			// The icmp_seq_nb and icmp_ident fields are unused.
-			// Jump to the next header which contains the original IP header
 			struct rte_ipv4_hdr *ip = PAYLOAD(icmp);
 
 			if (ip->next_proto_id != IPPROTO_ICMP) {
@@ -88,9 +119,6 @@ static struct rte_mbuf *get_icmp_response(uint16_t id) {
 	return mbuf;
 }
 
-// Global id which is used to differentiate between api clients
-static rte_atomic16_t icmp_ident = RTE_ATOMIC16_INIT(0);
-
 static struct api_out icmp_send(const void *request, void **response) {
 	const struct gr_ip4_icmp_send_req *req = request;
 	struct gr_ip4_icmp_send_resp *resp = NULL;
@@ -105,11 +133,12 @@ static struct api_out icmp_send(const void *request, void **response) {
 		goto fail;
 	}
 
-	resp->id = rte_atomic16_add_return(&icmp_ident, 1);
+	resp->id = icmp_ident++;
 	ret = icmp_local_send(req->vrf, req->addr, nh, resp->id, req->seq_num, req->ttl);
 	if (ret < 0)
 		goto fail;
 
+	gr_vec_add(inflight_requests, icmp_ident);
 	*response = resp;
 
 	return api_out(0, sizeof(*resp));
@@ -127,6 +156,12 @@ static struct api_out icmp_recv(const void *request, void **response) {
 	struct rte_mbuf *m;
 	size_t len = 0;
 	int ret = 0;
+
+	for (size_t i = 0; i < gr_vec_len(inflight_requests); i++)
+		if (icmp_req->id == inflight_requests[i]) {
+			gr_vec_del_swap(inflight_requests, i);
+			break;
+		}
 
 	m = get_icmp_response(icmp_req->id);
 	if (m == NULL)
@@ -149,6 +184,7 @@ static struct api_out icmp_recv(const void *request, void **response) {
 	if (icmp->icmp_type != RTE_ICMP_TYPE_ECHO_REPLY) {
 		// RFC 792: Destination Unreachable or Time Exceeded
 		// The icmp_seq_nb and icmp_ident fields are unused.
+		// We already verified the packet is legit in icmp_input_cb
 		// Jump to the next header which contains the original IP header
 		ip = PAYLOAD(icmp);
 		// Skip the original IP header to find the original ICMP payload
