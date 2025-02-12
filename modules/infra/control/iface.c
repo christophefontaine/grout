@@ -83,6 +83,7 @@ struct iface *iface_create(
 	if (next_ifid(&ifid) < 0)
 		goto fail;
 
+	iface->mode = GR_IFACE_MODE_L3;
 	iface->id = ifid;
 	iface->type_id = type_id;
 	iface->flags = flags;
