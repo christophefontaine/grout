@@ -41,6 +41,7 @@
 
 typedef enum gr_iface_mode {
 	GR_IFACE_MODE_L3 = 0,
+	GR_IFACE_MODE_XCONNECT,
 	GR_IFACE_MODE_COUNT
 } __attribute__((mode(QI))) gr_iface_mode_t;
 
