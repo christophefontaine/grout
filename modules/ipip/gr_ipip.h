@@ -10,7 +10,9 @@
 #include <gr_macro.h>
 #include <gr_net_types.h>
 
-#define GR_IFACE_TYPE_IPIP 0x03
+typedef enum {
+	GR_IFACE_TYPE_IPIP = 0x03,
+} __attribute__((mode(QI))) gr_iface_type_ipip_t;
 
 // IPIP reconfig attributes
 #define GR_IPIP_SET_LOCAL GR_BIT64(32)

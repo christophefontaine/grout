@@ -26,7 +26,7 @@ ipip_list_info(const struct gr_api_client *, const struct gr_iface *iface, char 
 }
 
 static struct cli_iface_type ipip_type = {
-	.type_id = GR_IFACE_TYPE_IPIP,
+	.type_id = (gr_iface_type_t)GR_IFACE_TYPE_IPIP,
 	.name = "ipip",
 	.show = ipip_show,
 	.list_info = ipip_list_info,
@@ -73,7 +73,7 @@ static uint64_t parse_ipip_args(
 static cmd_status_t ipip_add(const struct gr_api_client *c, const struct ec_pnode *p) {
 	const struct gr_infra_iface_add_resp *resp;
 	struct gr_infra_iface_add_req req = {
-		.iface = {.type = GR_IFACE_TYPE_IPIP, .flags = GR_IFACE_F_UP}
+		.iface = {.type = (gr_iface_type_t)GR_IFACE_TYPE_IPIP, .flags = GR_IFACE_F_UP}
 	};
 	void *resp_ptr = NULL;
 
