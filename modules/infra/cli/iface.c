@@ -293,7 +293,7 @@ static cmd_status_t iface_list(const struct gr_api_client *c, const struct ec_pn
 			scols_line_set_data(line, 3, "L3");
 			break;
 		default:
-			scols_line_sprintf(line, 3, "%d", iface->mode);
+			scols_line_sprintf(line, 3, "%u", iface->mode);
 			break;
 		}
 
