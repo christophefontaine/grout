@@ -21,12 +21,17 @@ GR_MBUF_PRIV_DATA_TYPE(ip_output_mbuf_data, { const struct nexthop *nh; });
 GR_MBUF_PRIV_DATA_TYPE(arp_reply_mbuf_data, { const struct nexthop *local; });
 
 GR_MBUF_PRIV_DATA_TYPE(ip_local_mbuf_data, {
-	ip4_addr_t src;
-	ip4_addr_t dst;
+	uint8_t family;
 	uint16_t len;
 	uint16_t vrf_id;
 	uint8_t proto;
-	uint8_t ttl;
+	union {
+		uint8_t ttl;
+		uint8_t hop_limit;
+	};
+
+	ip4_addr_t src;
+	ip4_addr_t dst;
 });
 
 void ip_input_local_add_proto(uint8_t proto, const char *next_node);

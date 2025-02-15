@@ -21,12 +21,18 @@
 GR_MBUF_PRIV_DATA_TYPE(ip6_output_mbuf_data, { const struct nexthop *nh; });
 
 GR_MBUF_PRIV_DATA_TYPE(ip6_local_mbuf_data, {
+	uint8_t family;
+	uint16_t len;
+	uint16_t vrf_id;
+	uint8_t proto;
+	union {
+		uint8_t ttl;
+		uint8_t hop_limit;
+	};
+
 	struct rte_ipv6_addr src;
 	struct rte_ipv6_addr dst;
-	uint16_t len;
 	uint16_t ext_offset;
-	uint8_t hop_limit;
-	uint8_t proto;
 });
 
 GR_MBUF_PRIV_DATA_TYPE(ndp_na_output_mbuf_data, {
