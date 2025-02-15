@@ -19,9 +19,10 @@ typedef enum {
 	GR_IFACE_TYPE_PORT = 0x01,
 	GR_IFACE_TYPE_VLAN = 0x02,
 	GR_IFACE_TYPE_IPIP = 0x03,
-	GR_IFACE_TYPE_LOOPBACK = 0xff,
-	GR_IFACE_TYPE_MAX = 256
-} __attribute__((mode(HI))) gr_iface_type_t;
+	GR_IFACE_TYPE_VXLAN = 0x04,
+	GR_IFACE_TYPE_LOOPBACK = 0xfe,
+	GR_IFACE_TYPE_MAX = 255
+} __attribute__((mode(QI))) gr_iface_type_t;
 
 // Interface configure flags
 typedef enum {
