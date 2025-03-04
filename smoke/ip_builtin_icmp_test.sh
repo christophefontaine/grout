@@ -37,3 +37,5 @@ grcli ping 1.1.1.1 count 1 && fail "ping to unknown route succeeded"
 grcli ping 172.16.1.3 count 1 && fail "ping to non-existent host succeeded"
 
 grcli traceroute 172.16.0.2
+
+grcli show stats software
