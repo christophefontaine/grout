@@ -219,6 +219,28 @@ static int worker_graph_new(struct worker *worker, uint8_t index) {
 		ret = -rte_errno;
 		goto err;
 	}
+
+	struct rte_node *node_tmp;
+	rte_graph_off_t off;
+	rte_node_t count;
+
+	rte_graph_foreach_node (count, off, rte_graph_lookup(name), node_tmp) {
+		/* Need to set the node Lcore affinity before clone graph for each lcore */
+		if (node_tmp->dispatch.lcore_id == RTE_MAX_LCORE) {
+			ret = rte_graph_model_mcore_dispatch_node_lcore_affinity_set(
+				node_tmp->name, worker->lcore_id
+			);
+			if (ret == 0)
+				LOG(DEBUG,
+				    "Set node %s affinity to lcore %u",
+				    node_tmp->name,
+				    worker->lcore_id);
+			else
+				ABORT("rte_graph_model_mcore_dispatch_node_lcore_affinity_set: %s",
+				      rte_strerror(rte_errno));
+		}
+	}
+
 	worker->graph[index] = rte_graph_lookup(name);
 
 	return 0;
@@ -273,6 +295,10 @@ static void graph_init(struct event_base *) {
 	struct rte_node_register *reg;
 	struct gr_node_info *info;
 
+	if (rte_graph_worker_model_set(RTE_GRAPH_MODEL_MCORE_DISPATCH) != 0) {
+		ABORT("Set graph mcore dispatch model failed %s", rte_strerror(rte_errno));
+	}
+
 	// register nodes first
 	STAILQ_FOREACH (info, &node_infos, next) {
 		if (info->node == NULL)
@@ -282,6 +308,14 @@ static void graph_init(struct event_base *) {
 		reg->id = __rte_node_register(reg);
 		if (reg->id == RTE_NODE_ID_INVALID)
 			ABORT("__rte_node_register(%s): %s", reg->name, rte_strerror(rte_errno));
+		if (reg->flags & GR_NODE_FLAG_CONTROL_PLANE)
+			if (rte_graph_model_mcore_dispatch_node_lcore_affinity_set(
+				    reg->name, rte_lcore_id()
+			    ))
+				ABORT("control plane node %s on core %d: %s ",
+				      reg->name,
+				      rte_lcore_id(),
+				      rte_strerror(rte_errno));
 		gr_vec_add(node_names, reg->name);
 	}
 

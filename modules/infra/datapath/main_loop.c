@@ -166,6 +166,16 @@ reconfig:
 		goto reconfig;
 	}
 
+	if (rte_graph_worker_model_set(RTE_GRAPH_MODEL_MCORE_DISPATCH) != 0)
+		ABORT("rte_graph_worker_model_set %s", rte_strerror(rte_errno));
+	if (rte_graph_model_mcore_dispatch_core_bind(rte_graph_from_name(graph->name), w->lcore_id)
+	    != 0)
+		LOG(ERR,
+		    "bind graph %s to lcore %u failed: %s",
+		    name,
+		    w->lcore_id,
+		    rte_strerror(rte_errno));
+
 	if (stats_reload(graph, &ctx) < 0)
 		goto shutdown;
 	atomic_store(&w->stats, ctx.w_stats);
