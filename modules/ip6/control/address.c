@@ -213,7 +213,12 @@ static struct api_out addr6_del(const void *request, void ** /*response*/) {
 	struct rte_ipv6_addr solicited_node;
 	struct nexthop *nh = NULL;
 	struct hoplist *addrs;
+	struct iface *iface;
 	unsigned i = 0;
+
+	iface = iface_from_id(req->addr.iface_id);
+	if (iface == NULL)
+		return api_out(errno, 0);
 
 	if ((addrs = addr6_get_all(req->addr.iface_id)) == NULL)
 		return api_out(errno, 0);
@@ -236,6 +241,8 @@ static struct api_out addr6_del(const void *request, void ** /*response*/) {
 		return api_out(EBUSY, 0);
 
 	rib6_cleanup(nh);
+	rib6_delete(iface->vrf_id, iface->id, &nh->ipv6, nh->prefixlen);
+	nexthop_decref(nh);
 
 	// shift the remaining addresses
 	gr_vec_del(addrs->nh, i);
@@ -299,7 +306,7 @@ static const struct rte_ipv6_addr well_known_mcast_addrs[] = {
 	RTE_IPV6_ADDR_ALLROUTERS_SITE_LOCAL,
 };
 
-static void ip6_iface_event_handler(uint32_t event, const void *obj) {
+static void ip6_iface_event_handler(iface_event_t event, const void *obj) {
 	struct rte_ipv6_addr link_local, solicited_node;
 	const struct iface *iface = obj;
 	struct rte_ether_addr mac;
@@ -325,8 +332,11 @@ static void ip6_iface_event_handler(uint32_t event, const void *obj) {
 	case IFACE_EVENT_PRE_REMOVE:
 		struct hoplist *addrs = &iface_addrs[iface->id];
 
-		gr_vec_foreach (nh, addrs->nh)
-			rib6_cleanup(nh);
+		gr_vec_foreach (nh, addrs->nh) {
+			rib6_delete(iface->vrf_id, iface->id, &nh->ipv6, nh->prefixlen);
+			nexthop_decref(nh);
+		}
+
 		gr_vec_free(addrs->nh);
 
 		addrs = &iface_mcast_addrs[iface->id];
