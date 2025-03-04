@@ -1,0 +1,35 @@
+From 7948b9cfad2a67a72169b44c98e7422bba144d1a Mon Sep 17 00:00:00 2001
+From: Christophe Fontaine <cfontain@redhat.com>
+Date: Tue, 4 Mar 2025 21:54:30 +0000
+Subject: [PATCH] graph: allow non EAL Thread for pipeline mode
+
+rte_graph_model_mcore_dispatch_core_bind relied on
+rte_lcore_is_enabled.
+Yet, "rte_lcore_is_enabled" only checks for EAL threads, which forbids
+external threads (NON EAL) to run a part of the graph.
+
+Only verify if the lcore role is not "ROLE_OFF".
+
+Signed-off-by: Christophe Fontaine <cfontain@redhat.com>
+---
+ lib/graph/graph.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/lib/graph/graph.c b/lib/graph/graph.c
+index dff8e69..18d8e27 100644
+--- a/lib/graph/graph.c
++++ b/lib/graph/graph.c
+@@ -324,8 +324,8 @@ rte_graph_model_mcore_dispatch_core_bind(rte_graph_t id, int lcore)
+ 
+ 	if (graph_from_id(id) == NULL)
+ 		goto fail;
+-	if (!rte_lcore_is_enabled(lcore))
+-		SET_ERR_JMP(ENOLINK, fail, "lcore %d not enabled", lcore);
++	if (rte_lcore_has_role(lcore, ROLE_OFF))
++		SET_ERR_JMP(ENOLINK, fail, "lcore %d is invalid", lcore);
+ 
+ 	STAILQ_FOREACH(graph, &graph_list, next)
+ 		if (graph->id == id)
+-- 
+2.39.5
+
