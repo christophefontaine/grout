@@ -130,9 +130,12 @@ void worker_graph_free(struct worker *worker) {
 }
 
 static int worker_graph_new(struct worker *worker, uint8_t index) {
+	rte_graph_t ctl_graph = RTE_GRAPH_ID_INVALID;
+	rte_graph_t graph = RTE_GRAPH_ID_INVALID;
 	struct rx_node_queues *rx = NULL;
 	struct tx_node_queues *tx = NULL;
 	char name[RTE_GRAPH_NAMESIZE];
+	char ctl_name[RTE_GRAPH_NAMESIZE];
 	struct queue_map *qmap;
 	uint16_t graph_uid;
 	unsigned n_rxqs;
@@ -152,6 +155,7 @@ static int worker_graph_new(struct worker *worker, uint8_t index) {
 	// unique suffix for this graph
 	graph_uid = (worker->cpu_id << 1) | (0x1 & index);
 	snprintf(name, sizeof(name), "gr-%04x", graph_uid);
+	snprintf(ctl_name, sizeof(ctl_name), "gr-%04x-ctl", graph_uid);
 
 	// build rx & tx nodes data
 	len = sizeof(*rx) + n_rxqs * sizeof(struct rx_port_queue);
@@ -175,6 +179,12 @@ static int worker_graph_new(struct worker *worker, uint8_t index) {
 	}
 	rx->n_queues = n_rxqs;
 	if (gr_node_data_set(name, "port_rx", rx) < 0) {
+		if (rte_errno == 0)
+			rte_errno = EINVAL;
+		ret = -rte_errno;
+		goto err;
+	}
+	if (gr_node_data_set(ctl_name, "port_rx", rx) < 0) {
 		if (rte_errno == 0)
 			rte_errno = EINVAL;
 		ret = -rte_errno;
@@ -205,6 +215,12 @@ static int worker_graph_new(struct worker *worker, uint8_t index) {
 		ret = -rte_errno;
 		goto err;
 	}
+	if (gr_node_data_set(ctl_name, "port_tx", tx) < 0) {
+		if (rte_errno == 0)
+			rte_errno = EINVAL;
+		ret = -rte_errno;
+		goto err;
+	}
 	tx = NULL;
 
 	// graph init
@@ -213,11 +229,15 @@ static int worker_graph_new(struct worker *worker, uint8_t index) {
 		.nb_node_patterns = gr_vec_len(node_names),
 		.node_patterns = (const char **)node_names,
 	};
-	if (rte_graph_create(name, &params) == RTE_GRAPH_ID_INVALID) {
+	if ((graph = rte_graph_create(name, &params)) == RTE_GRAPH_ID_INVALID) {
 		if (rte_errno == 0)
 			rte_errno = EINVAL;
 		ret = -rte_errno;
 		goto err;
+	}
+	// rte_graph_worker_model_set must be called after all graph creation
+	if (rte_graph_worker_model_set(RTE_GRAPH_MODEL_MCORE_DISPATCH) != 0) {
+		ABORT("Set graph mcore dispatch model failed %s", rte_strerror(rte_errno));
 	}
 
 	struct rte_node *node_tmp;
@@ -242,12 +262,32 @@ static int worker_graph_new(struct worker *worker, uint8_t index) {
 	}
 
 	worker->graph[index] = rte_graph_lookup(name);
+	params.socket_id = rte_lcore_to_socket_id(rte_lcore_id());
+	if (worker->ctl_graph)
+		rte_graph_destroy(worker->ctl_graph->id);
+	if ((ctl_graph = rte_graph_clone(graph, "ctl", &params)) == RTE_GRAPH_ID_INVALID) {
+		if (rte_errno == 0)
+			rte_errno = EINVAL;
+		ret = -rte_errno;
+		goto err;
+	}
 
+	if (rte_graph_model_mcore_dispatch_core_bind(ctl_graph, rte_lcore_id()) != 0)
+		LOG(ERR,
+		    "bind graph %s to lcore %u failed: %s",
+		    rte_graph_id_to_name(ctl_graph),
+		    rte_lcore_id(),
+		    rte_strerror(rte_errno));
+
+	worker->ctl_graph = rte_graph_lookup(rte_graph_id_to_name(ctl_graph));
 	return 0;
 err:
+	rte_graph_destroy(graph);
+	rte_graph_destroy(ctl_graph);
 	free(rx);
 	free(tx);
 	node_data_reset(name);
+	node_data_reset(ctl_name);
 	return errno_set(-ret);
 }
 

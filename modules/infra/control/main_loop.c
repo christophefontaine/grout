@@ -13,12 +13,10 @@ static struct event *ctrlloop_ev;
 
 static void control_loop(evutil_socket_t, short, void *) {
 	struct worker *worker;
-	struct rte_graph *graph;
 
 	STAILQ_FOREACH (worker, &workers, next) {
-		graph = worker->graph[worker->cur_config];
-		if (worker->started && graph)
-			rte_graph_walk(graph);
+		if (worker->started && worker->ctl_graph)
+			rte_graph_walk(worker->ctl_graph);
 	}
 }
 

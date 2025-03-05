@@ -44,6 +44,7 @@ struct worker {
 	atomic_uint cur_config; // dataplane: wo, ctlplane: ro
 	// synced with thread_fence
 	struct rte_graph *graph[2]; // dataplane: ro, ctlplane: rw
+	struct rte_graph *ctl_graph; // dataplane: no_access, ctlplane: rw
 	atomic_uint max_sleep_us; // dataplane: ro, ctlplane: rw
 
 	atomic_bool stats_reset; // dataplane: rw, ctlplane: rw
