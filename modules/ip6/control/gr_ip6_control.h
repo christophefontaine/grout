@@ -29,6 +29,7 @@ nh6_lookup(uint16_t vrf_id, uint16_t iface_id, const struct rte_ipv6_addr *ip) {
 void nh6_unreachable_cb(struct rte_mbuf *m);
 void ndp_probe_input_cb(struct rte_mbuf *m);
 void ndp_router_sollicit_input_cb(struct rte_mbuf *m);
+void ndp_router_advert_input_cb(struct rte_mbuf *m);
 
 int rib6_insert(uint16_t vrf_id, uint16_t iface_id, const struct rte_ipv6_addr *, uint8_t prefixlen, struct nexthop *);
 int rib6_delete(

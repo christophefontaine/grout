@@ -126,6 +126,21 @@ void ndp_router_sollicit_input_cb(struct rte_mbuf *m) {
 	event_active(ra_conf[iface_id].timer, 0, 0);
 }
 
+void ndp_router_advert_input_cb(struct rte_mbuf *m) {
+	struct icmp6 *icmp6 = rte_pktmbuf_mtod(m, struct icmp6 *);
+	uint16_t iface_id = mbuf_data(m)->iface->id;
+	struct icmp6_router_advert *ra;
+
+	// TODO: if autoconf is configured, configure a new IPv6 address
+	// also configure static routes
+	ra = PAYLOAD(icmp6);
+	if (ra->managed_addr == 1) // We don't support DHCPv6 (yet)
+		goto free;
+
+free:
+	rte_pktmbuf_free(m);
+}
+
 static void build_ra_packet(struct rte_mbuf *m, struct rte_ipv6_addr *srcv6) {
 	struct rte_ipv6_addr dst = RTE_IPV6_ADDR_ALLNODES_LINK_LOCAL;
 	struct rte_ipv6_addr src = *srcv6;
