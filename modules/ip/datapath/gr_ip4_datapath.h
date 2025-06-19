@@ -28,6 +28,8 @@ GR_MBUF_PRIV_DATA_TYPE(ip_local_mbuf_data, {
 	uint8_t ttl;
 });
 
+GR_MBUF_PRIV_DATA_TYPE(icmp_mbuf_data, { clock_t timestamp; });
+
 void ip_input_local_add_proto(uint8_t proto, const char *next_node);
 void ip_output_register_interface_type(gr_iface_type_t type, const char *next_node);
 void ip_output_register_nexthop_type(gr_nh_type_t type, const char *next_node);
@@ -66,6 +68,6 @@ int icmp_local_send(
 	uint8_t ttl
 );
 
-void icmp_input_register_callback(uint8_t icmp_type, control_output_cb_t cb);
+void icmp_input_register_type(uint8_t icmp_type, const char *next_node);
 
 #endif

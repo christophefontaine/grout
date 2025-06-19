@@ -14,7 +14,7 @@
 #include <rte_ether.h>
 
 enum {
-	CONTROL = 0,
+	ARP_PROBE = 0,
 	DROP,
 	ERROR,
 	EDGE_COUNT,
@@ -26,7 +26,6 @@ static uint16_t arp_input_request_process(
 	void **objs,
 	uint16_t nb_objs
 ) {
-	struct control_output_mbuf_data *ctrl_data;
 	const struct nexthop *local;
 	const struct iface *iface;
 	struct rte_arp_hdr *arp;
@@ -45,10 +44,7 @@ static uint16_t arp_input_request_process(
 			goto next;
 		}
 
-		ctrl_data = control_output_mbuf_data(mbuf);
-		ctrl_data->callback = arp_probe_input_cb;
-		ctrl_data->iface = iface;
-		edge = CONTROL;
+		edge = ARP_PROBE;
 next:
 		if (gr_mbuf_is_traced(mbuf))
 			gr_mbuf_trace_add(mbuf, node, 0);
@@ -65,7 +61,7 @@ static struct rte_node_register node = {
 
 	.nb_edges = EDGE_COUNT,
 	.next_nodes = {
-		[CONTROL] = "control_output",
+		[ARP_PROBE] = "arp_probe",
 		[DROP] = "arp_input_request_drop",
 		[ERROR] = "arp_input_request_error",
 	},
