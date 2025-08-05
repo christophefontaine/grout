@@ -102,6 +102,33 @@ const struct nexthop *fib4_lookup(uint16_t vrf_id, ip4_addr_t ip) {
 	return nh_id_to_ptr(nh_id);
 }
 
+void fib4_lookup_x4(
+	uint16_t vrf_id,
+	ip4_addr_t ip0,
+	ip4_addr_t ip1,
+	ip4_addr_t ip2,
+	ip4_addr_t ip3,
+	const struct nexthop *nhs[4]
+) {
+	struct rte_fib *fib = get_fib(vrf_id);
+	uint32_t host_order_ips[4];
+
+	host_order_ips[0] = rte_be_to_cpu_32(ip0);
+	host_order_ips[1] = rte_be_to_cpu_32(ip1);
+	host_order_ips[2] = rte_be_to_cpu_32(ip2);
+	host_order_ips[3] = rte_be_to_cpu_32(ip3);
+
+	if (fib == NULL) {
+		nhs[0] = NULL;
+		nhs[1] = NULL;
+		nhs[2] = NULL;
+		nhs[3] = NULL;
+		return;
+	}
+
+	rte_fib_lookup_bulk(fib, host_order_ips, (uint64_t *)nhs, 4);
+}
+
 int fib4_insert(uint16_t vrf_id, ip4_addr_t ip, uint8_t prefixlen, const struct nexthop *nh) {
 	struct rte_fib *fib;
 	int ret;

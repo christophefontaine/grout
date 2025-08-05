@@ -40,6 +40,64 @@ void ip_input_register_nexthop_type(gr_nh_type_t type, const char *next_node) {
 	nh_type_edges[type] = gr_node_attach_parent("ip_input", next_node);
 }
 
+static inline rte_edge_t ip_validate_mbuf(struct rte_mbuf *mbuf, struct rte_ipv4_hdr *ip) {
+	// RFC 1812 section 5.2.2 IP Header Validation
+	//
+	// (1) The packet length reported by the Link Layer must be large
+	//     enough to hold the minimum length legal IP datagram (20 bytes).
+	if (rte_pktmbuf_data_len(mbuf) < sizeof(struct rte_ipv4_hdr)) {
+		// XXX: call rte_pktmuf_data_len is used to ensure that the IPv4 header
+		// is located on the first segment. IPv4 headers located on the second,
+		// third or subsequent segments, as well spanning segment boundaries, are
+		// not currently handled.
+		return BAD_LENGTH;
+	}
+	// (2) The IP checksum must be correct.
+	switch (mbuf->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK) {
+	case RTE_MBUF_F_RX_IP_CKSUM_NONE:
+	case RTE_MBUF_F_RX_IP_CKSUM_UNKNOWN:
+		// if this is not checked in H/W, check it.
+		if (rte_ipv4_cksum(ip)) {
+			return BAD_CHECKSUM;
+		}
+		break;
+	case RTE_MBUF_F_RX_IP_CKSUM_BAD:
+		return BAD_CHECKSUM;
+	}
+
+	// (3) The IP version number must be 4.  If the version number is not 4
+	//     then the packet may be another version of IP, such as IPng or
+	//     ST-II.
+	if (ip->version != IPVERSION) {
+		return BAD_VERSION;
+	}
+
+	// (4) The IP header length field must be large enough to hold the
+	//     minimum length legal IP datagram (20 bytes = 5 words).
+	if (rte_ipv4_hdr_len(ip) < sizeof(struct rte_ipv4_hdr)) {
+		return BAD_LENGTH;
+	}
+
+	// (5) The IP total length field must be large enough to hold the IP
+	//     datagram header, whose length is specified in the IP header
+	//     length field.
+	if (rte_cpu_to_be_16(ip->total_length) < sizeof(struct rte_ipv4_hdr)) {
+		return BAD_LENGTH;
+	}
+	return 0;
+}
+
+static inline rte_edge_t edge_for_nh(const struct nexthop *nh, ip4_addr_t dst, int domain) {
+	if (unlikely(nh == NULL))
+		return NO_ROUTE;
+	else if (nh->flags & GR_NH_F_LOCAL && dst == nh->ipv4)
+		return LOCAL;
+	else if (domain == ETH_DOMAIN_LOOPBACK)
+		return OUTPUT;
+	else
+		return FORWARD;
+}
+
 static uint16_t
 ip_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
 	struct eth_input_mbuf_data *e;
@@ -49,65 +107,130 @@ ip_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, ui
 	struct rte_ipv4_hdr *ip;
 	struct rte_mbuf *mbuf;
 	rte_edge_t edge;
-	uint16_t i;
+	uint16_t i = 0;
 
-	for (i = 0; i < nb_objs; i++) {
+	__m128i is_valid = _mm_setzero_si128();
+	__m128i loopback = _mm_set1_epi32(ETH_DOMAIN_LOOPBACK);
+	__m128i local = _mm_set1_epi32(ETH_DOMAIN_LOCAL);
+	//__m128i broadcast = _mm_set1_epi32(ETH_DOMAIN_BROADCAST);
+	//__m128i multicast = _mm_set1_epi32(ETH_DOMAIN_MULTICAST);
+
+	while (i + 4 < nb_objs) {
+		if (i + 8 < nb_objs) {
+			rte_prefetch0(objs[i + 4]);
+			rte_prefetch0(objs[i + 5]);
+			rte_prefetch0(objs[i + 6]);
+			rte_prefetch0(objs[i + 7]);
+		}
+		struct rte_mbuf *m0 = objs[i + 0];
+		struct rte_mbuf *m1 = objs[i + 1];
+		struct rte_mbuf *m2 = objs[i + 2];
+		struct rte_mbuf *m3 = objs[i + 3];
+		struct rte_ipv4_hdr *ip0 = rte_pktmbuf_mtod(m0, struct rte_ipv4_hdr *);
+		struct rte_ipv4_hdr *ip1 = rte_pktmbuf_mtod(m1, struct rte_ipv4_hdr *);
+		struct rte_ipv4_hdr *ip2 = rte_pktmbuf_mtod(m2, struct rte_ipv4_hdr *);
+		struct rte_ipv4_hdr *ip3 = rte_pktmbuf_mtod(m3, struct rte_ipv4_hdr *);
+
+		rte_edge_t v0 = ip_validate_mbuf(m0, ip0);
+		rte_edge_t v1 = ip_validate_mbuf(m1, ip1);
+		rte_edge_t v2 = ip_validate_mbuf(m2, ip2);
+		rte_edge_t v3 = ip_validate_mbuf(m3, ip3);
+		struct eth_input_mbuf_data *e0 = eth_input_mbuf_data(m0);
+		struct eth_input_mbuf_data *e1 = eth_input_mbuf_data(m1);
+		struct eth_input_mbuf_data *e2 = eth_input_mbuf_data(m2);
+		struct eth_input_mbuf_data *e3 = eth_input_mbuf_data(m3);
+		const struct iface *i0 = e0->iface;
+		const struct iface *i1 = e1->iface;
+		const struct iface *i2 = e2->iface;
+		const struct iface *i3 = e3->iface;
+
+		auto d0 = e0->domain;
+		auto d1 = e1->domain;
+		auto d2 = e2->domain;
+		auto d3 = e3->domain;
+
+		__m128i v = _mm_set_epi32(v0, v1, v2, v3);
+		__m128i d = _mm_set_epi32(d0, d1, d2, d3);
+		__m128i mbuf_valid = _mm_cmpeq_epi32(v, is_valid);
+		__m128i domains = _mm_cmpeq_epi32(d, loopback) | _mm_cmpeq_epi16(d, local);
+
+		int16_t res = _mm_movemask_epi8(mbuf_valid);
+		if (res != -1) {
+			break; // mbuf invalid, process all vector 1 element at a time
+		}
+
+		res = _mm_movemask_epi8(domains);
+		if (res != -1) {
+			break;
+		}
+		const struct nexthop *nhs[4] = {0};
+		
+		if (i0->vrf_id == i1->vrf_id && i1->vrf_id == i3->vrf_id
+		    && i2->vrf_id == i3->vrf_id) {
+			fib4_lookup_x4(
+				i0->vrf_id,
+				ip0->dst_addr,
+				ip1->dst_addr,
+				ip2->dst_addr,
+				ip3->dst_addr,
+				nhs
+			);
+		} else  {
+			nhs[0] = fib4_lookup(i0->vrf_id, ip0->dst_addr);
+			nhs[1] = fib4_lookup(i1->vrf_id, ip1->dst_addr);
+			nhs[2] = fib4_lookup(i2->vrf_id, ip2->dst_addr);
+			nhs[3] = fib4_lookup(i3->vrf_id, ip3->dst_addr);
+		}
+
+		v0 = edge_for_nh(nhs[0], ip0->dst_addr, e0->domain);
+		v1 = edge_for_nh(nhs[1], ip1->dst_addr, e1->domain);
+		v2 = edge_for_nh(nhs[2], ip2->dst_addr, e2->domain);
+		v3 = edge_for_nh(nhs[3], ip3->dst_addr, e3->domain);
+
+		if (gr_mbuf_is_traced(m0)) {
+			struct rte_ipv4_hdr *t = gr_mbuf_trace_add(m0, node, sizeof(*t));
+			*t = *ip0;
+		}
+		if (gr_mbuf_is_traced(m1)) {
+			struct rte_ipv4_hdr *t = gr_mbuf_trace_add(m1, node, sizeof(*t));
+			*t = *ip1;
+		}
+		if (gr_mbuf_is_traced(m2)) {
+			struct rte_ipv4_hdr *t = gr_mbuf_trace_add(m2, node, sizeof(*t));
+			*t = *ip2;
+		}
+
+		if (gr_mbuf_is_traced(m3)) {
+			struct rte_ipv4_hdr *t = gr_mbuf_trace_add(m3, node, sizeof(*t));
+			*t = *ip3;
+		}
+
+		 ip_output_mbuf_data(m0)->nh = nhs[0];
+		 ip_output_mbuf_data(m1)->nh = nhs[1];
+		 ip_output_mbuf_data(m2)->nh = nhs[2];
+		 ip_output_mbuf_data(m3)->nh = nhs[3];
+
+		if (v0 == v1 && v1 == v2 && v2 == v3)
+			rte_node_enqueue_x4(graph, node, v0, m0, m1, m2, m3);
+		else {
+			rte_node_enqueue_x1(graph, node, v0, m0);
+			rte_node_enqueue_x1(graph, node, v1, m1);
+			rte_node_enqueue_x1(graph, node, v2, m2);
+			rte_node_enqueue_x1(graph, node, v3, m3);
+		}
+
+		i += 4;
+	}
+
+	for (; i < nb_objs; i++) {
 		mbuf = objs[i];
 		ip = rte_pktmbuf_mtod(mbuf, struct rte_ipv4_hdr *);
 		e = eth_input_mbuf_data(mbuf);
 		iface = e->iface;
 		nh = NULL;
 
-		// RFC 1812 section 5.2.2 IP Header Validation
-		//
-		// (1) The packet length reported by the Link Layer must be large
-		//     enough to hold the minimum length legal IP datagram (20 bytes).
-		if (rte_pktmbuf_data_len(mbuf) < sizeof(struct rte_ipv4_hdr)) {
-			// XXX: call rte_pktmuf_data_len is used to ensure that the IPv4 header
-			// is located on the first segment. IPv4 headers located on the second,
-			// third or subsequent segments, as well spanning segment boundaries, are
-			// not currently handled.
-			edge = BAD_LENGTH;
+		if (unlikely((edge = ip_validate_mbuf(mbuf, ip)) != 0))
 			goto next;
-		}
-
-		// (2) The IP checksum must be correct.
-		switch (mbuf->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK) {
-		case RTE_MBUF_F_RX_IP_CKSUM_NONE:
-		case RTE_MBUF_F_RX_IP_CKSUM_UNKNOWN:
-			// if this is not checked in H/W, check it.
-			if (rte_ipv4_cksum(ip)) {
-				edge = BAD_CHECKSUM;
-				goto next;
-			}
-			break;
-		case RTE_MBUF_F_RX_IP_CKSUM_BAD:
-			edge = BAD_CHECKSUM;
-			goto next;
-		}
-
-		// (3) The IP version number must be 4.  If the version number is not 4
-		//     then the packet may be another version of IP, such as IPng or
-		//     ST-II.
-		if (ip->version != IPVERSION) {
-			edge = BAD_VERSION;
-			goto next;
-		}
-
-		// (4) The IP header length field must be large enough to hold the
-		//     minimum length legal IP datagram (20 bytes = 5 words).
-		if (rte_ipv4_hdr_len(ip) < sizeof(struct rte_ipv4_hdr)) {
-			edge = BAD_LENGTH;
-			goto next;
-		}
-
-		// (5) The IP total length field must be large enough to hold the IP
-		//     datagram header, whose length is specified in the IP header
-		//     length field.
-		if (rte_cpu_to_be_16(ip->total_length) < sizeof(struct rte_ipv4_hdr)) {
-			edge = BAD_LENGTH;
-			goto next;
-		}
 
 		switch (e->domain) {
 		case ETH_DOMAIN_LOOPBACK:
@@ -199,6 +322,7 @@ int gr_rte_log_type;
 struct node_infos node_infos = STAILQ_HEAD_INITIALIZER(node_infos);
 mock_func(rte_edge_t, gr_node_attach_parent(const char *, const char *));
 mock_func(const struct nexthop *, fib4_lookup(uint16_t, ip4_addr_t));
+mock_func(void, fib4_lookup_x4(uint16_t, ip4_addr_t, ip4_addr_t, ip4_addr_t, ip4_addr_t, const struct nexthop *[4]));
 mock_func(void *, gr_mbuf_trace_add(struct rte_mbuf *, struct rte_node *, size_t));
 mock_func(uint16_t, drop_packets(struct rte_graph *, struct rte_node *, void **, uint16_t));
 mock_func(int, drop_format(char *, size_t, const void *, size_t));
