@@ -40,6 +40,8 @@ eth_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 	rte_be16_t eth_type;
 	struct rte_mbuf *m;
 	size_t l2_hdr_size;
+	rte_edge_t edge_ip4 = l2l3_edges[RTE_BE16(RTE_ETHER_TYPE_IPV4)];
+	rte_edge_t edge_ip6 = l2l3_edges[RTE_BE16(RTE_ETHER_TYPE_IPV6)];
 	rte_edge_t edge;
 
 	iface = NULL;
@@ -50,6 +52,8 @@ eth_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 	for (uint16_t i = 0; i < nb_objs; i++) {
 		m = objs[i];
 
+		rte_prefetch0_write(m);
+		rte_prefetch0_write(mbuf_data(m));
 		eth_in = eth_input_mbuf_data(m);
 		eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 		l2_hdr_size = sizeof(*eth);
@@ -76,7 +80,17 @@ eth_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 			}
 			eth_in->iface = vlan_iface;
 		}
-		edge = l2l3_edges[eth_type];
+
+		switch (eth_type) {
+		case RTE_BE16(RTE_ETHER_TYPE_IPV4):
+			edge = edge_ip4;
+			break;
+		case RTE_BE16(RTE_ETHER_TYPE_IPV6):
+			edge = edge_ip6;
+			break;
+		default:
+			edge = l2l3_edges[eth_type];
+		}
 
 		if (iface == NULL || iface->id != eth_in->iface->id) {
 			if (iface_get_eth_addr(eth_in->iface->id, &iface_mac) < 0) {
