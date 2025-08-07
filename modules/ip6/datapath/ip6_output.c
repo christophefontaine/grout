@@ -58,8 +58,86 @@ ip6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 	rte_edge_t edge;
 
 	sent = 0;
+	i = 0;
 
-	for (i = 0; i < nb_objs; i++) {
+	while (i+4 < nb_objs) {
+		struct rte_mbuf *m[4] = {objs[i], objs[i+1], objs[i+2], objs[i+3]};
+		const struct iface *ifaces[4];
+		const struct nexthop *nhs[4];
+		struct rte_ipv6_hdr *ips[4];
+		bool is_mcast[4];
+		rte_edge_t e[4];
+
+		#pragma GCC unroll 4
+		for (uint16_t k = 0; k < 4; k++) {
+			nhs[k] = ip6_output_mbuf_data(m[k])->nh;
+			m[k]->packet_type |= RTE_PTYPE_L3_IPV6;
+			e[k] = nh_type_edges[nhs[k]->type];
+			ips[k] = rte_pktmbuf_mtod(m[k], struct rte_ipv6_hdr *);
+			is_mcast[k] = rte_ipv6_addr_is_mcast(&ips[k]->dst_addr);
+			if(is_mcast[k])
+				ifaces[k] = mbuf_data(m[k])->iface;
+			else
+				ifaces[k] = iface_from_id(nhs[k]->iface_id);
+		}
+		if (unlikely(ifaces[0] == NULL || ifaces[1] == NULL || ifaces[2] == NULL || ifaces[3] == NULL))
+			break;
+
+		#pragma GCC unroll 4
+		for (uint16_t k = 0; k < 4; k++) {
+			if (rte_pktmbuf_pkt_len(m[k]) > ifaces[k]->mtu) {
+				e[k] = TOO_BIG;
+			}
+			else {
+				e[k] = iface_type_edges[ifaces[k]->type];
+				mbuf_data(m[k])->iface = ifaces[k];
+			}
+		}
+
+		if (unlikely(e[0] != e[1] || e[0] != e[2] || e[0] != e[3]))
+			break;
+		if (e[0] != ETH_OUTPUT)
+			goto quad_next;
+
+		#pragma GCC unroll 4
+		for (uint16_t k = 0; k < 4; k++) {
+			if (!is_mcast[k]
+		    		&& (nhs[k]->state != GR_NH_S_REACHABLE
+				|| (nhs[k]->flags & GR_NH_F_LINK
+				    && !rte_ipv6_addr_eq(&ips[k]->dst_addr, &nhs[k]->ipv6))))
+				e[k] = HOLD;
+		}
+		if (unlikely(e[0] != e[1] || e[0] != e[2] || e[0] != e[3]))
+			break;
+
+		if (unlikely(e[0] == HOLD))
+			goto quad_next;
+
+		#pragma GCC unroll 4
+		for (uint16_t k = 0; k < 4; k++) {
+			// Prepare ethernet layer info.
+			eth_data = eth_output_mbuf_data(m[k]);
+			if (is_mcast[k])
+				rte_ether_mcast_from_ipv6(&eth_data->dst, &ips[k]->dst_addr);
+			else
+				eth_data->dst = nhs[k]->mac;
+			eth_data->ether_type = RTE_BE16(RTE_ETHER_TYPE_IPV6);
+		}
+
+		sent += 4;
+quad_next:
+		#pragma GCC unroll 4
+		for (uint16_t k = 0; k < 4; k++) {
+			if (gr_mbuf_is_traced(m[k])) {
+				struct rte_ipv6_hdr *t = gr_mbuf_trace_add(m[k], node, sizeof(*t));
+				*t = *ips[k];
+			}
+		}
+		rte_node_enqueue_x4(graph, node, e[0], m[0], m[1], m[2], m[3]);
+		i+=4;
+	}
+
+	for (; i < nb_objs; i++) {
 		mbuf = objs[i];
 		ip = rte_pktmbuf_mtod(mbuf, struct rte_ipv6_hdr *);
 
