@@ -42,14 +42,13 @@ static int trace_srv6_format(char *buf, size_t len, const void *data, size_t /*d
 static uint16_t
 srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
 	struct trace_srv6_data *t = NULL;
-	struct rte_ipv6_routing_ext *srh;
 	struct rte_ipv6_hdr *outer_ip6;
 	struct srv6_encap_data *d;
 	const struct nexthop *nh;
-	uint32_t hdrlen, plen;
 	struct rte_mbuf *m;
-	uint8_t proto, reduc;
 	rte_edge_t edge;
+	uint32_t plen;
+	uint8_t proto;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
 		m = objs[i];
@@ -95,39 +94,16 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 		}
 
 		// Encapsulate with another IPv6 header
-		hdrlen = sizeof(*outer_ip6);
-		reduc = d->encap == SR_H_ENCAPS_RED ? 1 : 0;
-		if (d->n_seglist > reduc)
-			hdrlen += sizeof(*srh) + (d->n_seglist * sizeof(d->seglist[0]));
-
-		outer_ip6 = (struct rte_ipv6_hdr *)rte_pktmbuf_prepend(m, hdrlen);
+		outer_ip6 = (struct rte_ipv6_hdr *)rte_pktmbuf_prepend(m, d->len);
 		if (unlikely(outer_ip6 == NULL)) {
 			edge = NO_HEADROOM;
 			goto next;
 		}
-
-		if (d->n_seglist > reduc) {
-			struct rte_ipv6_addr *segments;
-			uint16_t k;
-
-			srh = (struct rte_ipv6_routing_ext *)(outer_ip6 + 1);
-			srh->next_hdr = proto;
-			srh->hdr_len = (hdrlen - sizeof(*outer_ip6)) / 8 - 1;
-			srh->type = RTE_IPV6_SRCRT_TYPE_4;
-			srh->segments_left = d->n_seglist - 1;
-			srh->last_entry = d->n_seglist - 1;
-			srh->flags = 0;
-			srh->tag = 0;
-
-			segments = (struct rte_ipv6_addr *)(srh + 1);
-			for (k = reduc; k < d->n_seglist; k++)
-				segments[d->n_seglist - k - 1] = d->seglist[k];
-			proto = IPPROTO_ROUTING;
-			plen += hdrlen - sizeof(*outer_ip6);
-		}
+		plen += d->len - sizeof(*outer_ip6);
+		memcpy(outer_ip6, &d->template_hdr, d->len);
 
 		// Resolve nexthop for the encapsulated packet.
-		nh = fib6_lookup(nh->vrf_id, GR_IFACE_ID_UNDEF, d->seglist);
+		nh = fib6_lookup(nh->vrf_id, GR_IFACE_ID_UNDEF, &d->dst);
 		if (nh == NULL) {
 			edge = NO_ROUTE;
 			goto next;
@@ -141,7 +117,7 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 			goto next;
 		}
 
-		ip6_set_fields(outer_ip6, plen, proto, &nh->ipv6, &d->seglist[0]);
+		ip6_set_fields(outer_ip6, plen, proto, &nh->ipv6, &d->dst);
 		edge = IP6_OUTPUT;
 
 next:

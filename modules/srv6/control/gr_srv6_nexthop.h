@@ -16,9 +16,14 @@ GR_NH_PRIV_DATA_TYPE(srv6_localsid_nh_priv, {
 });
 
 struct srv6_encap_data {
-	gr_srv6_encap_behavior_t encap;
-	uint16_t n_seglist;
-	struct rte_ipv6_addr seglist[];
+	struct rte_ipv6_addr dst;
+	uint8_t next_proto;
+	uint16_t len;
+	struct {
+		struct rte_ipv6_hdr hdr;
+		struct rte_ipv6_routing_ext srh;
+		struct rte_ipv6_addr seglist[];
+	} template_hdr __rte_aligned(2) __rte_packed;
 };
 
 //
