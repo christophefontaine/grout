@@ -30,6 +30,10 @@ void gr_eth_input_add_type(rte_be16_t eth_type, const char *next_node) {
 
 static uint16_t
 eth_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
+	const rte_edge_t edge_ip4 = l2l3_edges[RTE_BE16(RTE_ETHER_TYPE_IPV4)];
+	const rte_edge_t edge_ip6 = l2l3_edges[RTE_BE16(RTE_ETHER_TYPE_IPV6)];
+	struct rte_mbuf *vec_ipv4[RTE_GRAPH_BURST_SIZE];
+	struct rte_mbuf *vec_ipv6[RTE_GRAPH_BURST_SIZE];
 	uint16_t vlan_id, last_iface_id, last_vlan_id;
 	const struct iface *vlan_iface, *iface;
 	struct eth_input_mbuf_data *eth_in;
@@ -37,11 +41,11 @@ eth_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 	struct rte_ether_hdr *eth;
 	struct rte_vlan_hdr *vlan;
 	struct iface_stats *stats;
+	uint16_t nb_vec4 = 0;
+	uint16_t nb_vec6 = 0;
 	rte_be16_t eth_type;
 	struct rte_mbuf *m;
 	size_t l2_hdr_size;
-	rte_edge_t edge_ip4 = l2l3_edges[RTE_BE16(RTE_ETHER_TYPE_IPV4)];
-	rte_edge_t edge_ip6 = l2l3_edges[RTE_BE16(RTE_ETHER_TYPE_IPV6)];
 	rte_edge_t edge;
 
 	iface = NULL;
@@ -50,10 +54,14 @@ eth_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 	last_vlan_id = UINT16_MAX;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
-		m = objs[i];
+		if (i + 1 < nb_objs) {
+			m = objs[i+1];
+			rte_prefetch0_write(m);
+			rte_prefetch0_write(mbuf_data(m));
+			rte_prefetch0(rte_pktmbuf_mtod(m, void*));
+		}
 
-		rte_prefetch0_write(m);
-		rte_prefetch0_write(mbuf_data(m));
+		m = objs[i];
 		eth_in = eth_input_mbuf_data(m);
 		eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 		l2_hdr_size = sizeof(*eth);
@@ -125,8 +133,18 @@ next:
 			t->iface_id = eth_in->iface->id;
 		}
 		rte_pktmbuf_adj(m, l2_hdr_size);
-		rte_node_enqueue_x1(graph, node, edge, m);
+		if (edge == edge_ip4) {
+			vec_ipv4[nb_vec4++] = m;
+		} else if (edge == edge_ip6) {
+			vec_ipv6[nb_vec6++] = m;
+		} else {
+			rte_node_enqueue_x1(graph, node, edge, m);
+		}
 	}
+	if (nb_vec4)
+		rte_node_enqueue(graph, node, edge_ip4, (void *)vec_ipv4, nb_vec4);
+	if (nb_vec6)
+		rte_node_enqueue(graph, node, edge_ip6, (void *)vec_ipv6, nb_vec6);
 	return nb_objs;
 }
 
