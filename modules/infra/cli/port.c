@@ -108,6 +108,17 @@ static uint64_t parse_port_args(
 		set_attrs |= GR_IFACE_SET_DOMAIN;
 		iface->mode = GR_IFACE_MODE_L1_XC;
 		iface->domain_id = peer.id;
+	} else if (arg_str(p, "l2-bridge")) {
+		uint16_t domain_id;
+		if (arg_u16(p, "BRIDGE_DOMAIN", &domain_id) == 0) {
+			set_attrs |= GR_IFACE_SET_MODE;
+			set_attrs |= GR_IFACE_SET_DOMAIN;
+			iface->mode = GR_IFACE_MODE_L2_BRIDGE;
+			iface->domain_id = domain_id;
+		} else {
+			errno = EINVAL;
+			goto err;
+		}
 	}
 
 	if (set_attrs == 0)
@@ -149,17 +160,22 @@ static cmd_status_t port_set(const struct gr_api_client *c, const struct ec_pnod
 }
 
 #define PORT_ATTRS_CMD                                                                             \
-	IFACE_ATTRS_CMD ",(mac MAC),(rxqs N_RXQ),(qsize Q_SIZE),(mode l3|(xconnect PEER))"
+	IFACE_ATTRS_CMD ",(mac MAC),(rxqs N_RXQ),(qsize Q_SIZE),(mode l3|(xconnect PEER)|(l2-bridge BRIDGE_DOMAIN))"
 
 #define PORT_ATTRS_ARGS                                                                            \
 	IFACE_ATTRS_ARGS, with_help("Set the ethernet address.", ec_node_re("MAC", ETH_ADDR_RE)),  \
 		with_help("Number of Rx queues.", ec_node_uint("N_RXQ", 0, UINT16_MAX - 1, 10)),   \
 		with_help("Rx/Tx queues size.", ec_node_uint("Q_SIZE", 0, UINT16_MAX - 1, 10)),    \
-		with_help("mode: \"l3\" or \"xconnect\"", ec_node_str("l3", "l3")),                \
-		with_help("mode: \"l3\" or \"xconnect\"", ec_node_str("xconnect", "xconnect")),    \
+		with_help("mode: \"l3\", \"xconnect\", or \"l2-bridge\"", ec_node_str("l3", "l3")),                \
+		with_help("mode: \"l3\", \"xconnect\", or \"l2-bridge\"", ec_node_str("xconnect", "xconnect")),    \
+		with_help("mode: \"l3\", \"xconnect\", or \"l2-bridge\"", ec_node_str("l2-bridge", "l2-bridge")),    \
 		with_help(                                                                         \
 			"Peer interface for xconnect",                                             \
 			ec_node_dyn("PEER", complete_iface_names, INT2PTR(GR_IFACE_TYPE_PORT))     \
+		),                                                                             \
+		with_help(                                                                         \
+			"Bridge domain ID for L2 bridge mode",                                    \
+			ec_node_uint("BRIDGE_DOMAIN", 0, UINT16_MAX - 1, 10)                      \
 		)
 
 static int ctx_init(struct ec_node *root) {

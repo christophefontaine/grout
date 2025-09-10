@@ -292,6 +292,9 @@ static cmd_status_t iface_list(const struct gr_api_client *c, const struct ec_pn
 		case GR_IFACE_MODE_L1_XC:
 			scols_line_set_data(line, 3, "XC");
 			break;
+		case GR_IFACE_MODE_L2_BRIDGE:
+			scols_line_set_data(line, 3, "L2");
+			break;
 		case GR_IFACE_MODE_L3:
 			scols_line_set_data(line, 3, "L3");
 			break;

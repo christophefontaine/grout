@@ -259,8 +259,29 @@ static int iface_port_reconfig(
 			v->mtu = iface->mtu;
 	}
 
-	if (set_attrs & GR_IFACE_SET_MODE)
+	if (set_attrs & GR_IFACE_SET_MODE) {
+		gr_iface_mode_t old_mode = iface->mode;
 		iface->mode = conf->mode;
+		
+		// Automatically manage promiscuous mode based on interface mode
+		if (conf->mode == GR_IFACE_MODE_L2_BRIDGE && old_mode != GR_IFACE_MODE_L2_BRIDGE) {
+			// Enable promiscuous mode when switching to L2 bridge
+			ret = rte_eth_promiscuous_enable(p->port_id);
+			if (ret < 0)
+				errno_log(-ret, "rte_eth_promiscuous_enable for L2 mode");
+			if (rte_eth_promiscuous_get(p->port_id) == 1)
+				iface->flags |= GR_IFACE_F_PROMISC;
+		} else if (old_mode == GR_IFACE_MODE_L2_BRIDGE && conf->mode != GR_IFACE_MODE_L2_BRIDGE) {
+			// Disable promiscuous mode when switching away from L2 bridge (unless explicitly set)
+			if (!(conf->flags & GR_IFACE_F_PROMISC)) {
+				ret = rte_eth_promiscuous_disable(p->port_id);
+				if (ret < 0)
+					errno_log(-ret, "rte_eth_promiscuous_disable from L2 mode");
+				if (rte_eth_promiscuous_get(p->port_id) == 0)
+					iface->flags &= ~GR_IFACE_F_PROMISC;
+			}
+		}
+	}
 
 	if (set_attrs & GR_IFACE_SET_VRF)
 		iface->vrf_id = conf->vrf_id;
