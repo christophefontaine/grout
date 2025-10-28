@@ -17,6 +17,11 @@ enum edges {
 	EDGE_COUNT,
 };
 
+enum xstats {
+	NO_RSS,
+	XSTATS_COUNT,
+};
+
 static uint16_t ip6_loadbalance_process(
 	struct rte_graph *graph,
 	struct rte_node *node,
@@ -38,7 +43,8 @@ static uint16_t ip6_loadbalance_process(
 			edge = NO_NEXTHOP;
 			goto next;
 		}
-		// TODO: increment xstat on ! mbuf->ol_flags & RTE_MBUF_F_RX_RSS_HASH
+		if (unlikely((mbuf->ol_flags & RTE_MBUF_F_RX_RSS_HASH) == 0))
+			rte_node_xstat_increment(node, NO_RSS, 1);
 		d->nh = g->members[mbuf->hash.rss % g->n_members].nh;
 next:
 		if (gr_mbuf_is_traced(mbuf))
@@ -54,6 +60,13 @@ static void loadbalance_register(void) {
 	ip6_output_register_nexthop_type(GR_NH_T_GROUP, "ip6_loadbalance");
 }
 
+static struct rte_node_xstats ip6_loadbalance_xstats = {
+        .nb_xstats = XSTATS_COUNT,
+        .xstat_desc = {
+                [NO_RSS] = "no_valid_rss",
+        },
+};
+
 static struct rte_node_register ip6_lb_node = {
 	.name = "ip6_loadbalance",
 	.process = ip6_loadbalance_process,
@@ -62,6 +75,7 @@ static struct rte_node_register ip6_lb_node = {
 		[OUTPUT] = "ip6_output",
 		[NO_NEXTHOP] = "ip6_lb_no_nexthop",
 	},
+	.xstats = &ip6_loadbalance_xstats,
 };
 
 static struct gr_node_info info_loadbalance = {
