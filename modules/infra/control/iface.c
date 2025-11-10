@@ -131,7 +131,7 @@ struct iface *iface_create(const struct gr_iface *conf, const void *api_info) {
 
 	memset(iface_stats[ifid], 0, sizeof(iface_stats[ifid]));
 
-	gr_event_push(GR_EVENT_IFACE_POST_ADD, iface);
+	gr_event_enqueue(GR_EVENT_IFACE_POST_ADD, &iface, sizeof(iface));
 
 	return iface;
 fail:
@@ -217,7 +217,7 @@ int iface_reconfig(
 			return ret;
 	}
 
-	gr_event_push(GR_EVENT_IFACE_POST_RECONFIG, iface);
+	gr_event_enqueue(GR_EVENT_IFACE_POST_RECONFIG, &iface, sizeof(iface));
 
 	return ret;
 }
@@ -456,9 +456,9 @@ int iface_destroy(uint16_t ifid) {
 	// interface is still up, send status down
 	if (iface->flags & GR_IFACE_F_UP) {
 		iface->flags &= ~GR_IFACE_F_UP;
-		gr_event_push(GR_EVENT_IFACE_STATUS_DOWN, iface);
+		gr_event_enqueue(GR_EVENT_IFACE_STATUS_DOWN, &iface, sizeof(iface));
 	}
-	gr_event_push(GR_EVENT_IFACE_PRE_REMOVE, iface);
+	gr_event_enqueue(GR_EVENT_IFACE_PRE_REMOVE, &iface, sizeof(iface));
 	if (iface->type != GR_IFACE_TYPE_LOOPBACK)
 		vrf_decref(iface->vrf_id);
 	nexthop_iface_cleanup(ifid);
@@ -535,14 +535,14 @@ static void iface_event(uint32_t event, const void *obj) {
 		str = "STATUS_UP";
 		gr_vec_foreach (struct iface *s, iface->subinterfaces) {
 			s->state |= GR_IFACE_S_RUNNING;
-			gr_event_push(event, s);
+			gr_event_enqueue(event, s, sizeof(*s));
 		}
 		break;
 	case GR_EVENT_IFACE_STATUS_DOWN:
 		str = "STATUS_DOWN";
 		gr_vec_foreach (struct iface *s, iface->subinterfaces) {
 			s->state &= ~GR_IFACE_S_RUNNING;
-			gr_event_push(event, s);
+			gr_event_enqueue(event, s, sizeof(*s));
 		}
 		break;
 	default:

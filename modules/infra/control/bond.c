@@ -395,9 +395,9 @@ static void bond_event(uint32_t, const void *obj) {
 	bond_update_active_members(b);
 
 	if (b->state & GR_IFACE_S_RUNNING && b->flags & GR_IFACE_F_UP)
-		gr_event_push(GR_EVENT_IFACE_STATUS_UP, b);
+		gr_event_enqueue(GR_EVENT_IFACE_STATUS_UP, b, sizeof(*b));
 	else
-		gr_event_push(GR_EVENT_IFACE_STATUS_DOWN, b);
+		gr_event_enqueue(GR_EVENT_IFACE_STATUS_DOWN, b, sizeof(*b));
 }
 
 static struct gr_event_subscription bond_event_handler = {

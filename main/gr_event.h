@@ -20,7 +20,7 @@ struct gr_event_subscription {
 void gr_event_subscribe(struct gr_event_subscription *);
 
 // Notify all subscribers (see gr_event_subscribe)
-void gr_event_push(uint32_t ev_type, const void *obj);
+void gr_event_enqueue(uint32_t ev_type, const void *obj, const size_t obj_sz);
 
 // Convert an event object to an API notification message
 //

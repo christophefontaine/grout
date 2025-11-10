@@ -21,7 +21,7 @@ struct workers workers;
 void gr_register_api_handler(struct gr_api_handler *) { }
 void gr_register_module(struct gr_module *) { }
 void iface_type_register(struct iface_type *) { }
-void gr_event_push(uint32_t, const void *) { }
+void gr_event_enqueue(uint32_t, const void *, const size_t) { }
 mock_func(struct rte_mempool *, gr_pktmbuf_pool_get(int8_t, uint32_t));
 void gr_pktmbuf_pool_release(struct rte_mempool *, uint32_t) { }
 struct rte_rcu_qsbr *gr_datapath_rcu(void) {

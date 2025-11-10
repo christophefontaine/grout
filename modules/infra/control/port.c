@@ -761,13 +761,17 @@ static void link_event_cb(evutil_socket_t, short /*what*/, void * /*priv*/) {
 				if (!(iface->state & GR_IFACE_S_RUNNING)) {
 					LOG(INFO, "%s: link status up", iface->name);
 					iface->state |= GR_IFACE_S_RUNNING;
-					gr_event_push(GR_EVENT_IFACE_STATUS_UP, iface);
+					gr_event_enqueue(
+						GR_EVENT_IFACE_STATUS_UP, iface, sizeof(*iface)
+					);
 				}
 			} else {
 				if (iface->state & GR_IFACE_S_RUNNING) {
 					LOG(INFO, "%s: link status down", iface->name);
 					iface->state &= ~GR_IFACE_S_RUNNING;
-					gr_event_push(GR_EVENT_IFACE_STATUS_DOWN, iface);
+					gr_event_enqueue(
+						GR_EVENT_IFACE_STATUS_DOWN, iface, sizeof(*iface)
+					);
 				}
 				continue;
 			}

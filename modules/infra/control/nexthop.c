@@ -360,7 +360,7 @@ struct nexthop *nexthop_new(const struct gr_nexthop_base *base, const void *info
 	nh_stats.by_type[nh->type]++;
 
 	if (nh->origin != GR_NH_ORIGIN_INTERNAL)
-		gr_event_push(GR_EVENT_NEXTHOP_NEW, nh);
+		gr_event_enqueue(GR_EVENT_NEXTHOP_NEW, nh, sizeof(*nh));
 
 	return nh;
 }
@@ -397,7 +397,7 @@ int nexthop_update(struct nexthop *nh, const struct gr_nexthop_base *base, const
 	}
 
 	if (nh->ref_count > 0 && nh->origin != GR_NH_ORIGIN_INTERNAL)
-		gr_event_push(GR_EVENT_NEXTHOP_UPDATE, nh);
+		gr_event_enqueue(GR_EVENT_NEXTHOP_UPDATE, nh, sizeof(*nh));
 
 	return 0;
 }
@@ -535,7 +535,7 @@ void nexthop_decref(struct nexthop *nh) {
 	nh->ref_count--;
 	if (nh->ref_count == 0) {
 		if (nh->origin != GR_NH_ORIGIN_INTERNAL)
-			gr_event_push(GR_EVENT_NEXTHOP_DELETE, nh);
+			gr_event_enqueue(GR_EVENT_NEXTHOP_DELETE, nh, sizeof(*nh));
 
 		nh_groups_remove_member(nh);
 		nexthop_id_put(nh);

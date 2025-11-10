@@ -191,14 +191,15 @@ static int rib6_insert_or_replace(
 	*o = origin;
 	fib6_insert(vrf_id, iface_id, scoped_ip, prefixlen, nh);
 	if (origin != GR_NH_ORIGIN_INTERNAL) {
-		gr_event_push(
+		gr_event_enqueue(
 			GR_EVENT_IP6_ROUTE_ADD,
 			&(const struct route6_event) {
 				.dest = {*ip, prefixlen},
 				.vrf_id = vrf_id,
 				.origin = origin,
 				.nh = nh,
-			}
+			},
+			sizeof(struct route6_event)
 		);
 	}
 
@@ -262,14 +263,15 @@ int rib6_delete(
 	fib6_remove(vrf_id, iface_id, scoped_ip, prefixlen);
 
 	if (origin != GR_NH_ORIGIN_INTERNAL) {
-		gr_event_push(
+		gr_event_enqueue(
 			GR_EVENT_IP6_ROUTE_DEL,
 			&(const struct route6_event) {
 				.dest = {*ip, prefixlen},
 				.vrf_id = vrf_id,
 				.origin = origin,
 				.nh = nh,
-			}
+			},
+			sizeof(struct route6_event)
 		);
 	}
 	// Update statistics

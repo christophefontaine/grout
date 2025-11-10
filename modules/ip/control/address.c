@@ -132,7 +132,7 @@ static struct api_out addr_add(const void *request, struct api_ctx *) {
 		    &req->addr.addr.ip,
 		    strerror(errno));
 
-	gr_event_push(GR_EVENT_IP_ADDR_ADD, &req->addr);
+	gr_event_enqueue(GR_EVENT_IP_ADDR_ADD, &req->addr, sizeof(req->addr));
 
 	return api_out(0, 0, NULL);
 }
@@ -161,7 +161,7 @@ static struct api_out addr_del(const void *request, struct api_ctx *) {
 		return api_out(ENOENT, 0, NULL);
 	}
 
-	gr_event_push(GR_EVENT_IP_ADDR_DEL, &req->addr);
+	gr_event_enqueue(GR_EVENT_IP_ADDR_DEL, &req->addr, sizeof(req->addr));
 
 	rib4_cleanup(nh);
 

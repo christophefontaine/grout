@@ -263,12 +263,13 @@ iface6_addr_add(const struct iface *iface, const struct rte_ipv6_addr *ip, uint8
 		gr_vec_free(nhs_old);
 	}
 
-	gr_event_push(
+	gr_event_enqueue(
 		GR_EVENT_IP6_ADDR_ADD,
 		&(struct gr_ip6_ifaddr) {
 			.iface_id = iface->id,
 			.addr = {*ip, prefixlen},
-		}
+		},
+		sizeof(struct gr_ip6_ifaddr)
 	);
 
 	return 0;
@@ -313,12 +314,13 @@ iface6_addr_del(const struct iface *iface, const struct rte_ipv6_addr *ip, uint8
 	if (nh == NULL)
 		return errno_set(ENOENT);
 
-	gr_event_push(
+	gr_event_enqueue(
 		GR_EVENT_IP6_ADDR_DEL,
 		&(struct gr_ip6_ifaddr) {
 			.iface_id = iface->id,
 			.addr = {*ip, prefixlen},
-		}
+		},
+		sizeof(struct gr_ip6_ifaddr)
 	);
 
 	rib6_cleanup(nh);
