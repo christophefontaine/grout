@@ -10,6 +10,8 @@
 #include <gr_trace.h>
 #include <gr_vec.h>
 
+#include <rte_ip6.h>
+
 //
 // srv6 source node. encapsulate traffic
 //
@@ -38,6 +40,58 @@ static int trace_srv6_format(char *buf, size_t len, const void *data, size_t /*d
 		return snprintf(buf, len, "match=" IP4_F "/%hhu", &t->dest4.ip, t->dest4.prefixlen);
 }
 
+// RFC 8754 inline mode: insert SRH directly into IPv6 packet
+static rte_edge_t srv6_inline_insert(struct rte_mbuf *m, const struct nexthop_info_srv6_output *d) {
+	struct rte_ipv6_hdr *ip6;
+	struct rte_ipv6_routing_ext *srh;
+	struct rte_ipv6_addr *segments;
+	uint32_t srh_len;
+	uint16_t payload_len;
+	uint8_t original_next_hdr;
+	uint16_t k;
+
+	ip6 = rte_pktmbuf_mtod(m, struct rte_ipv6_hdr *);
+
+	// Calculate SRH length
+	srh_len = sizeof(*srh) + (d->n_seglist * sizeof(d->seglist[0]));
+
+	// Prepend space for SRH
+	srh = (struct rte_ipv6_routing_ext *)rte_pktmbuf_prepend(m, srh_len);
+	if (unlikely(srh == NULL)) {
+		return NO_HEADROOM;
+	}
+
+	// Move IPv6 header to new position
+	ip6 = (struct rte_ipv6_hdr *)srh;
+	memmove(ip6, (uint8_t *)srh + srh_len, sizeof(*ip6));
+
+	// Save original next header and update IPv6 header
+	original_next_hdr = ip6->proto;
+	ip6->proto = IPPROTO_ROUTING;
+	payload_len = rte_be_to_cpu_16(ip6->payload_len) + srh_len;
+	ip6->payload_len = rte_cpu_to_be_16(payload_len);
+
+	// Setup SRH after IPv6 header
+	srh = (struct rte_ipv6_routing_ext *)(ip6 + 1);
+	srh->next_hdr = original_next_hdr;
+	srh->hdr_len = (srh_len / 8) - 1;
+	srh->type = RTE_IPV6_SRCRT_TYPE_4;
+	srh->segments_left = d->n_seglist - 1;
+	srh->last_entry = d->n_seglist - 1;
+	srh->flags = 0;
+	srh->tag = 0;
+
+	// Copy segments in reverse order (per RFC 8754)
+	segments = (struct rte_ipv6_addr *)(srh + 1);
+	for (k = 0; k < d->n_seglist; k++)
+		segments[d->n_seglist - k - 1] = d->seglist[k];
+
+	// Set destination to first segment
+	ip6->dst_addr = d->seglist[0];
+
+	return IP6_OUTPUT;
+}
+
 // called from 'ip6_output' or 'ip_output' node
 static uint16_t
 srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
@@ -62,6 +116,17 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 			struct rte_ipv4_hdr *inner_ip4;
 
 			nh = ip_output_mbuf_data(m)->nh;
+			d = nexthop_info_srv6_output(nh);
+			if (d == NULL) {
+				edge = INVALID;
+				goto next;
+			}
+
+			// Inline mode not applicable to IPv4 packets
+			if (d->encap == SR_H_INLINE) {
+				edge = INVALID;
+				goto next;
+			}
 			if (t != NULL && nh->type == GR_NH_T_L3) {
 				l3 = nexthop_info_l3(nh);
 				t->dest4.ip = l3->ipv4;
@@ -76,23 +141,40 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 			struct rte_ipv6_hdr *inner_ip6;
 
 			nh = ip6_output_mbuf_data(m)->nh;
+			d = nexthop_info_srv6_output(nh);
+			if (d == NULL) {
+				edge = INVALID;
+				goto next;
+			}
+
 			if (t != NULL && nh->type == GR_NH_T_L3) {
 				l3 = nexthop_info_l3(nh);
 				t->dest6.ip = l3->ipv6;
 				t->dest6.prefixlen = l3->prefixlen;
 				t->is_dest6 = true;
 			}
+
+			// Handle inline mode for IPv6 packets
+			if (d->encap == SR_H_INLINE) {
+				edge = srv6_inline_insert(m, d);
+				if (edge != IP6_OUTPUT)
+					goto next;
+
+				// Update nexthop for forwarding
+				nh = fib6_lookup(nh->vrf_id, GR_IFACE_ID_UNDEF, d->seglist);
+				if (nh == NULL) {
+					edge = NO_ROUTE;
+					goto next;
+				}
+				ip6_output_mbuf_data(m)->nh = nh;
+				goto next;
+			}
+
 			inner_ip6 = rte_pktmbuf_mtod(m, struct rte_ipv6_hdr *);
 			plen = rte_be_to_cpu_16(inner_ip6->payload_len);
 			proto = IPPROTO_IPV6;
 
 		} else {
-			edge = INVALID;
-			goto next;
-		}
-
-		d = nexthop_info_srv6_output(nh);
-		if (d == NULL) {
 			edge = INVALID;
 			goto next;
 		}
