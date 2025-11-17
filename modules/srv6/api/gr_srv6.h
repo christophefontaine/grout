@@ -17,12 +17,13 @@
 
 // SRv6 Route Headend Behaviors Signaling (rfc8986 8.4)
 typedef enum : uint8_t {
+	SR_H_INLINE,
 	SR_H_ENCAPS,
 	SR_H_ENCAPS_RED,
-} gr_srv6_encap_behavior_t;
+} gr_srv6_headend_behavior_t;
 
 struct gr_nexthop_info_srv6 {
-	gr_srv6_encap_behavior_t encap_behavior;
+	gr_srv6_headend_behavior_t headend_behavior;
 	uint8_t n_seglist;
 	struct rte_ipv6_addr seglist[];
 };

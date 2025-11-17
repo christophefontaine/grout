@@ -55,9 +55,11 @@ static cmd_status_t srv6_nh_add(struct gr_api_client *c, const struct ec_pnode *
 	}
 
 	if (arg_str(p, "h.encaps.red") != NULL)
-		sr6->encap_behavior = SR_H_ENCAPS_RED;
+		sr6->headend_behavior = SR_H_ENCAPS_RED;
+	else if (arg_str(p, "inline") != NULL)
+		sr6->headend_behavior = SR_H_INLINE;
 	else
-		sr6->encap_behavior = SR_H_ENCAPS;
+		sr6->headend_behavior = SR_H_ENCAPS;
 
 	if (gr_api_client_send_recv(c, GR_NH_ADD, len, req, NULL) < 0)
 		goto out;
@@ -107,12 +109,19 @@ static ssize_t format_nexthop_info_srv6(char *buf, size_t len, const void *info)
 	const struct gr_nexthop_info_srv6 *sr6 = info;
 	ssize_t n = 0;
 
-	SAFE_BUF(
-		snprintf,
-		len,
-		"%s",
-		sr6->encap_behavior == SR_H_ENCAPS_RED ? "h.encaps.red" : "h.encaps"
-	);
+	const char *behavior_str;
+	switch (sr6->headend_behavior) {
+	case SR_H_ENCAPS_RED:
+		behavior_str = "h.encaps.red";
+		break;
+	case SR_H_INLINE:
+		behavior_str = "inline";
+		break;
+	default:
+		behavior_str = "h.encaps";
+		break;
+	}
+	SAFE_BUF(snprintf, len, "%s", behavior_str);
 	for (unsigned i = 0; i < sr6->n_seglist; i++) {
 		SAFE_BUF(snprintf, len, " " IP6_F, &sr6->seglist[i]);
 		if (len - n < 30) {
@@ -138,11 +147,12 @@ static int ctx_init(struct ec_node *root) {
 
 	ret = CLI_COMMAND(
 		NEXTHOP_ADD_CTX(root),
-		"srv6 seglist SEGLIST+ [(encap h.encaps|h.encaps.red),(vrf VRF),(id ID)]",
+		"srv6 seglist SEGLIST+ [((encap h.encaps|h.encaps.red)|inline),(vrf VRF),(id ID)]",
 		srv6_nh_add,
 		"Add SRv6 encap nexthop.",
 		with_help("Encaps.", ec_node_str("h.encaps", "h.encaps")),
 		with_help("Encaps Reduced.", ec_node_str("h.encaps.red", "h.encaps.red")),
+		with_help("Inline mode.", ec_node_str("inline", "inline")),
 		with_help("Next SID to visit.", ec_node_re("SEGLIST", IPV6_RE)),
 		with_help("Nexthop ID.", ec_node_uint("ID", 1, UINT32_MAX - 1, 10)),
 		with_help("L3 routing domain ID.", ec_node_uint("VRF", 0, UINT16_MAX - 1, 10))
