@@ -39,7 +39,7 @@ static int srv6_output_nh_import_info(struct nexthop *nh, const void *info) {
 
 	memcpy(seglist, pub->seglist, sizeof(*seglist) * pub->n_seglist);
 
-	priv->encap = pub->encap_behavior;
+	priv->encap = pub->headend_behavior;
 	priv->n_seglist = pub->n_seglist;
 	tmp = priv->seglist;
 	priv->seglist = seglist;
@@ -62,7 +62,7 @@ static struct gr_nexthop *srv6_output_nh_to_api(const struct nexthop *nh, size_t
 	pub->base = nh->base;
 	sr6_pub = (struct gr_nexthop_info_srv6 *)pub->info;
 
-	sr6_pub->encap_behavior = sr6_priv->encap;
+	sr6_pub->headend_behavior = sr6_priv->encap;
 	sr6_pub->n_seglist = sr6_priv->n_seglist;
 	memcpy(sr6_pub->seglist,
 	       sr6_priv->seglist,

@@ -17,7 +17,7 @@ GR_NH_TYPE_INFO(GR_NH_T_SR6_LOCAL, nexthop_info_srv6_local, { BASE(gr_nexthop_in
 // A pointer to it is stored in nexthop priv.
 //
 GR_NH_TYPE_INFO(GR_NH_T_SR6_OUTPUT, nexthop_info_srv6_output, {
-	gr_srv6_encap_behavior_t encap;
+	gr_srv6_headend_behavior_t encap;
 	uint16_t n_seglist;
 	struct rte_ipv6_addr *seglist;
 });
