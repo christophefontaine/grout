@@ -273,21 +273,24 @@ static int grout_gr_nexthop_to_frr_nexthop(
 		break;
 	}
 	case GR_NH_T_SR6_OUTPUT: {
-		enum srv6_headend_behavior encap_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS;
+		enum srv6_headend_behavior headend_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS;
 		const struct gr_nexthop_info_srv6 *sr6;
 
 		sr6 = (const struct gr_nexthop_info_srv6 *)gr_nh->info;
 
-		switch (sr6->encap_behavior) {
+		switch (sr6->headend_behavior) {
+		case SR_H_INLINE:
+			headend_behavior = SRV6_HEADEND_BEHAVIOR_H_INSERT;
+			break;
 		case SR_H_ENCAPS:
-			encap_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS;
+			headend_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS;
 			break;
 		case SR_H_ENCAPS_RED:
-			encap_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED;
+			headend_behavior = SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED;
 			break;
 		}
 
-		nexthop_add_srv6_seg6(nh, (void *)sr6->seglist, sr6->n_seglist, encap_behavior);
+		nexthop_add_srv6_seg6(nh, (void *)sr6->seglist, sr6->n_seglist, headend_behavior);
 		break;
 	}
 	case GR_NH_T_GROUP:
@@ -751,10 +754,10 @@ grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *n
 
 		switch (nh->nh_srv6->seg6_segs->encap_behavior) {
 		case SRV6_HEADEND_BEHAVIOR_H_ENCAPS:
-			sr6->encap_behavior = SR_H_ENCAPS;
+			sr6->headend_behavior = SR_H_ENCAPS;
 			break;
 		case SRV6_HEADEND_BEHAVIOR_H_ENCAPS_RED:
-			sr6->encap_behavior = SR_H_ENCAPS_RED;
+			sr6->headend_behavior = SR_H_ENCAPS_RED;
 			break;
 		default:
 			gr_log_err(
