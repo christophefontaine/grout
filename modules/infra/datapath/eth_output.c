@@ -91,6 +91,7 @@ eth_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 		stats->tx_packets += 1;
 		stats->tx_bytes += rte_pktmbuf_pkt_len(mbuf);
 
+next:
 		if (gr_mbuf_is_traced(mbuf)) {
 			struct eth_trace_data *t = gr_mbuf_trace_add(mbuf, node, sizeof(*t));
 			t->eth.dst_addr = eth->dst_addr;
@@ -99,7 +100,6 @@ eth_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 			t->vlan_id = rte_be_to_cpu_16(vlan ? vlan->vlan_tci : 0);
 			t->iface_id = priv->iface->id;
 		}
-next:
 		rte_node_enqueue_x1(graph, node, edge, mbuf);
 	}
 
