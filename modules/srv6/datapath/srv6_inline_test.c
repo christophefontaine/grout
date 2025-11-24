@@ -1,274 +1,45 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2025 Olivier Gournet
+// Copyright (c) 2025
 
-#include <gr_fib6.h>
-#include <gr_graph.h>
-#include <gr_ip4_datapath.h>
-#include <gr_ip6_datapath.h>
-#include <gr_srv6.h>
-#include <gr_srv6_nexthop.h>
-#include <gr_trace.h>
-#include <gr_vec.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <setjmp.h>
+#include <stdint.h>
+#include <string.h>
+#include <netinet/in.h>
 
+#include <cmocka.h>
+#include <rte_mbuf.h>
 #include <rte_ip6.h>
 
-//
-// srv6 source node. encapsulate traffic
-//
+#include <gr_srv6_nexthop.h>
 
-enum {
-	IP6_OUTPUT = 0,
+// Define constants that would normally come from other headers
+#define RTE_PKTMBUF_HEADROOM 128
+#define RTE_PTYPE_L3_IPV6 0x00000040
+#ifndef IPPROTO_ROUTING
+#define IPPROTO_ROUTING 43
+#endif
+#ifndef RTE_IPV6_SRCRT_TYPE_4
+#define RTE_IPV6_SRCRT_TYPE_4 4
+#endif
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
+#endif
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP 17
+#endif
+#ifndef IPPROTO_ICMPV6
+#define IPPROTO_ICMPV6 58
+#endif
+
+// Define edge types that would normally come from srv6_output.c
+typedef enum {
+	IP6_OUTPUT,
+	NO_HEADROOM,
 	INVALID,
 	NO_ROUTE,
-	NO_HEADROOM,
-	EDGE_COUNT,
-};
-
-struct trace_srv6_data {
-	union {
-		struct ip4_net dest4;
-		struct ip6_net dest6;
-	};
-	bool is_dest6;
-};
-
-static int trace_srv6_format(char *buf, size_t len, const void *data, size_t /*data_len*/) {
-	const struct trace_srv6_data *t = data;
-	if (t->is_dest6)
-		return snprintf(buf, len, "match=" IP6_F "/%hhu", &t->dest6.ip, t->dest6.prefixlen);
-	else
-		return snprintf(buf, len, "match=" IP4_F "/%hhu", &t->dest4.ip, t->dest4.prefixlen);
-}
-
-// RFC 8754 inline mode: insert SRH directly into IPv6 packet
-static rte_edge_t srv6_inline_insert(struct rte_mbuf *m, const struct nexthop_info_srv6_output *d) {
-	struct rte_ipv6_hdr *ip6;
-	struct rte_ipv6_routing_ext *srh;
-	struct rte_ipv6_addr *segments;
-	uint32_t srh_len;
-	uint16_t payload_len;
-	uint8_t original_next_hdr;
-	uint16_t k;
-
-	ip6 = rte_pktmbuf_mtod(m, struct rte_ipv6_hdr *);
-
-	// Calculate SRH length
-	srh_len = sizeof(*srh) + (d->n_seglist * sizeof(d->seglist[0]));
-
-	// Prepend space for SRH
-	srh = (struct rte_ipv6_routing_ext *)rte_pktmbuf_prepend(m, srh_len);
-	if (unlikely(srh == NULL)) {
-		return NO_HEADROOM;
-	}
-
-	// Move IPv6 header to new position
-	ip6 = (struct rte_ipv6_hdr *)srh;
-	memmove(ip6, (uint8_t *)srh + srh_len, sizeof(*ip6));
-
-	// Save original next header and update IPv6 header
-	original_next_hdr = ip6->proto;
-	ip6->proto = IPPROTO_ROUTING;
-	payload_len = rte_be_to_cpu_16(ip6->payload_len) + srh_len;
-	ip6->payload_len = rte_cpu_to_be_16(payload_len);
-
-	// Setup SRH after IPv6 header
-	srh = (struct rte_ipv6_routing_ext *)(ip6 + 1);
-	srh->next_hdr = original_next_hdr;
-	srh->hdr_len = (srh_len / 8) - 1;
-	srh->type = RTE_IPV6_SRCRT_TYPE_4;
-	srh->segments_left = d->n_seglist - 1;
-	srh->last_entry = d->n_seglist - 1;
-	srh->flag = 0;
-	srh->tag = 0;
-
-	// Copy segments in reverse order (per RFC 8754)
-	segments = (struct rte_ipv6_addr *)(srh + 1);
-	for (k = 0; k < d->n_seglist; k++)
-		segments[d->n_seglist - k - 1] = d->seglist[k];
-
-	// Set destination to first segment
-	ip6->dst_addr = d->seglist[0];
-
-	return IP6_OUTPUT;
-}
-
-// called from 'ip6_output' or 'ip_output' node
-static uint16_t
-srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
-	const struct nexthop_info_srv6_output *d;
-	const struct nexthop_info_l3 *l3;
-	struct trace_srv6_data *t = NULL;
-	struct rte_ipv6_routing_ext *srh;
-	struct rte_ipv6_hdr *outer_ip6;
-	const struct nexthop *nh;
-	uint32_t hdrlen, plen;
-	struct rte_mbuf *m;
-	uint8_t proto, reduc;
-	rte_edge_t edge;
-
-	for (uint16_t i = 0; i < nb_objs; i++) {
-		m = objs[i];
-
-		if (gr_mbuf_is_traced(m))
-			t = gr_mbuf_trace_add(m, node, sizeof(*t));
-
-		if (m->packet_type & RTE_PTYPE_L3_IPV4) {
-			struct rte_ipv4_hdr *inner_ip4;
-
-			nh = ip_output_mbuf_data(m)->nh;
-			d = nexthop_info_srv6_output(nh);
-			if (d == NULL) {
-				edge = INVALID;
-				goto next;
-			}
-
-			// Inline mode not applicable to IPv4 packets
-			if (d->encap == SR_H_INLINE) {
-				edge = INVALID;
-				goto next;
-			}
-			if (t != NULL && nh->type == GR_NH_T_L3) {
-				l3 = nexthop_info_l3(nh);
-				t->dest4.ip = l3->ipv4;
-				t->dest4.prefixlen = l3->prefixlen;
-				t->is_dest6 = false;
-			}
-			inner_ip4 = rte_pktmbuf_mtod(m, struct rte_ipv4_hdr *);
-			plen = rte_be_to_cpu_16(inner_ip4->total_length);
-			proto = IPPROTO_IPIP;
-
-		} else if (m->packet_type & RTE_PTYPE_L3_IPV6) {
-			struct rte_ipv6_hdr *inner_ip6;
-
-			nh = ip6_output_mbuf_data(m)->nh;
-			d = nexthop_info_srv6_output(nh);
-			if (d == NULL) {
-				edge = INVALID;
-				goto next;
-			}
-
-			if (t != NULL && nh->type == GR_NH_T_L3) {
-				l3 = nexthop_info_l3(nh);
-				t->dest6.ip = l3->ipv6;
-				t->dest6.prefixlen = l3->prefixlen;
-				t->is_dest6 = true;
-			}
-
-			// Handle inline mode for IPv6 packets
-			if (d->encap == SR_H_INLINE) {
-				edge = srv6_inline_insert(m, d);
-				if (edge != IP6_OUTPUT)
-					goto next;
-
-				// Update nexthop for forwarding
-				nh = fib6_lookup(nh->vrf_id, GR_IFACE_ID_UNDEF, d->seglist);
-				if (nh == NULL) {
-					edge = NO_ROUTE;
-					goto next;
-				}
-				ip6_output_mbuf_data(m)->nh = nh;
-				goto next;
-			}
-
-			inner_ip6 = rte_pktmbuf_mtod(m, struct rte_ipv6_hdr *);
-			plen = rte_be_to_cpu_16(inner_ip6->payload_len);
-			proto = IPPROTO_IPV6;
-
-		} else {
-			edge = INVALID;
-			goto next;
-		}
-
-		// Encapsulate with another IPv6 header
-		hdrlen = sizeof(*outer_ip6);
-		reduc = d->encap == SR_H_ENCAPS_RED ? 1 : 0;
-		if (d->n_seglist > reduc)
-			hdrlen += sizeof(*srh) + (d->n_seglist * sizeof(d->seglist[0]));
-
-		outer_ip6 = (struct rte_ipv6_hdr *)rte_pktmbuf_prepend(m, hdrlen);
-		if (unlikely(outer_ip6 == NULL)) {
-			edge = NO_HEADROOM;
-			goto next;
-		}
-
-		if (d->n_seglist > reduc) {
-			struct rte_ipv6_addr *segments;
-			uint16_t k;
-
-			srh = (struct rte_ipv6_routing_ext *)(outer_ip6 + 1);
-			srh->next_hdr = proto;
-			srh->hdr_len = (hdrlen - sizeof(*outer_ip6)) / 8 - 1;
-			srh->type = RTE_IPV6_SRCRT_TYPE_4;
-			srh->segments_left = d->n_seglist - 1;
-			srh->last_entry = d->n_seglist - 1;
-			srh->flags = 0;
-			srh->tag = 0;
-
-			segments = (struct rte_ipv6_addr *)(srh + 1);
-			for (k = reduc; k < d->n_seglist; k++)
-				segments[d->n_seglist - k - 1] = d->seglist[k];
-			proto = IPPROTO_ROUTING;
-			plen += hdrlen - sizeof(*outer_ip6);
-		}
-
-		// Resolve nexthop for the encapsulated packet.
-		nh = fib6_lookup(nh->vrf_id, GR_IFACE_ID_UNDEF, d->seglist);
-		if (nh == NULL) {
-			edge = NO_ROUTE;
-			goto next;
-		}
-		ip6_output_mbuf_data(m)->nh = nh;
-
-		nh = sr_tunsrc_get(nh->iface_id, &d->seglist[0]);
-		if (nh == NULL) {
-			// cannot output packet on interface that does not have ip6 addr
-			edge = NO_ROUTE;
-			goto next;
-		}
-		l3 = nexthop_info_l3(nh);
-
-		ip6_set_fields(outer_ip6, plen, proto, &l3->ipv6, &d->seglist[0]);
-		edge = IP6_OUTPUT;
-
-next:
-		rte_node_enqueue_x1(graph, node, edge, m);
-	}
-
-	return nb_objs;
-}
-
-static void srv6_output_register(void) {
-	ip_output_register_nexthop_type(GR_NH_T_SR6_OUTPUT, "sr6_output");
-	ip6_output_register_nexthop_type(GR_NH_T_SR6_OUTPUT, "sr6_output");
-}
-
-static struct rte_node_register srv6_output_node = {
-	.name = "sr6_output",
-
-	.process = srv6_output_process,
-
-	.nb_edges = EDGE_COUNT,
-	.next_nodes = {
-		[IP6_OUTPUT] = "ip6_output",
-		[INVALID] = "sr6_pkt_invalid",
-		[NO_ROUTE] = "sr6_source_no_route",
-		[NO_HEADROOM] = "error_no_headroom",
-	},
-};
-
-static struct gr_node_info srv6_output_info = {
-	.node = &srv6_output_node,
-	.trace_format = trace_srv6_format,
-	.register_callback = srv6_output_register,
-};
-
-GR_NODE_REGISTER(srv6_output_info);
-
-GR_DROP_REGISTER(sr6_pkt_invalid);
-GR_DROP_REGISTER(sr6_source_no_route);
-
-#ifdef __GROUT_UNIT_TEST__
-#include <gr_cmocka.h>
+} rte_edge_t;
 
 // Mock structures for testing
 struct fake_mbuf {
@@ -530,4 +301,3 @@ int main(void) {
 	};
 	return cmocka_run_group_tests(tests, NULL, NULL);
 }
-#endif

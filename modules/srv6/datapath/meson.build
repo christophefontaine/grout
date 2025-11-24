@@ -12,4 +12,8 @@ tests += [
     'sources': files('srv6_local.c'),
     'link_args': [],
   },
+  {
+    'sources': files('srv6_output.c'),
+    'link_args': [],
+  },
 ]
