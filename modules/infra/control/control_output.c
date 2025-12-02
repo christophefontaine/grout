@@ -2,11 +2,14 @@
 // Copyright (c) 2024 Christophe Fontaine
 
 #include <gr_control_output.h>
+#include <gr_event.h>
 #include <gr_graph.h>
+#include <gr_iface.h>
 #include <gr_log.h>
 #include <gr_macro.h>
 #include <gr_mbuf.h>
 #include <gr_module.h>
+#include <gr_vec.h>
 
 #include <event2/event.h>
 #include <rte_ether.h>
@@ -112,6 +115,40 @@ static struct gr_module control_output_module = {
 	.fini = control_output_fini,
 };
 
+static void iface_event(uint32_t event, const void *obj) {
+	const struct iface *iface = obj;
+	gr_vec struct rte_mbuf **mbufs = NULL;
+	struct rte_mbuf *mbuf;
+	void *ring_item;
+
+	if (event != GR_EVENT_IFACE_PRE_REMOVE)
+		return;
+
+	while (rte_ring_dequeue(ctrlout_ring, &ring_item) == 0) {
+		mbuf = ring_item;
+		if (mbuf_data(mbuf)->iface == iface)
+			rte_pktmbuf_free(mbuf);
+		else
+			gr_vec_add(mbufs, mbuf);
+	}
+	gr_vec_foreach (mbuf, mbufs) {
+		control_output_enqueue(mbuf);
+	}
+	if (gr_vec_len(mbufs) > 0) {
+		control_output_done();
+		gr_vec_free(mbufs);
+	}
+}
+
+static struct gr_event_subscription iface_event_handler = {
+	.callback = iface_event,
+	.ev_count = 1,
+	.ev_types = {
+		GR_EVENT_IFACE_PRE_REMOVE,
+	},
+};
+
 RTE_INIT(control_output_module_init) {
 	gr_register_module(&control_output_module);
+	gr_event_subscribe(&iface_event_handler);
 }
