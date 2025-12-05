@@ -84,6 +84,9 @@ static uint16_t control_input_process(
 				LOG(ERR, "rte_pktmbuf_alloc %s", rte_strerror(rte_errno));
 				continue;
 			}
+			// 128B of headroom may not be enough when we want to encapsulate
+			// with a SRv6 header. Lets advance a bit.
+			rte_pktmbuf_adj(mbuf, 128);
 			control_input_mbuf_data(mbuf)->data = msg[i].data;
 		}
 
