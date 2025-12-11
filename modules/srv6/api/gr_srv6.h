@@ -97,3 +97,18 @@ struct gr_nexthop_info_srv6_local {
 	gr_srv6_behavior_t behavior;
 	gr_srv6_flags_t flags;
 };
+
+// interface nexthop mapping ///////////////////////////////////
+
+// Set interface to nexthop mapping for SRv6 L2 encapsulation.
+#define GR_SRV6_IFACE_NH_SET REQUEST_TYPE(GR_SRV6_MODULE, 0x0008)
+struct gr_srv6_iface_nh_set_req {
+	uint16_t iface_id;
+	uint32_t nh_id;
+};
+
+// Delete interface to nexthop mapping.
+#define GR_SRV6_IFACE_NH_DEL REQUEST_TYPE(GR_SRV6_MODULE, 0x0009)
+struct gr_srv6_iface_nh_del_req {
+	uint16_t iface_id;
+};
