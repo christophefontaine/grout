@@ -111,9 +111,13 @@ void fdb_learn(
 	uint16_t vlan_id,
 	const struct l3_addr *vtep
 ) {
+	const struct iface *iface = iface_from_id(iface->domain_id);
 	const struct fdb_key key = {bridge_id, vlan_id, *mac};
 	struct gr_fdb_entry *fdb;
 	void *data;
+
+	if (iface == NULL)
+		return;
 
 	if (rte_hash_lookup_data(fdb_hash, &key, &data) < 0) {
 		if (rte_mempool_get(fdb_pool, &data) < 0)
@@ -123,7 +127,10 @@ void fdb_learn(
 		fdb->bridge_id = bridge_id;
 		fdb->vlan_id = vlan_id;
 		fdb->mac = *mac;
-		fdb->flags = GR_FDB_F_LEARN;
+		if (iface->type == GR_IFACE_TYPE_VXLAN)
+			fdb->flags = GR_FDB_F_REMOTE;
+		else
+			fdb->flags = GR_FDB_F_LEARN;
 		fdb->iface_id = iface_id;
 		fdb->vtep = *vtep;
 
@@ -361,7 +368,7 @@ static void fdb_event_cb(uint32_t event, const void *obj) {
 		return;
 	}
 
-	if ((fdb->flags & GR_FDB_F_EXTERN) == 0)
+	if ((fdb->flags & (GR_FDB_F_EXTERN | GR_FDB_F_REMOTE)) == 0)
 		return;
 
 	bridge_info = iface_info_bridge(bridge);
