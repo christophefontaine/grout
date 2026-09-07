@@ -61,7 +61,7 @@ static struct rte_mempool *create_mempool(const struct gr_nexthop_config *c) {
 	snprintf(name, sizeof(name), "nexthops-%u", c->max_count);
 	struct rte_mempool *p = rte_mempool_create(
 		name,
-		rte_align32pow2(c->max_count) - 1,
+		c->max_count,
 		sizeof(struct nexthop),
 		0, // cache size
 		0, // priv size

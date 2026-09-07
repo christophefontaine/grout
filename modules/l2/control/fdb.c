@@ -54,7 +54,7 @@ static int fdb_reconfig(unsigned max_entries) {
 
 	struct rte_mempool *p = rte_mempool_create(
 		name,
-		rte_align32pow2(max_entries) - 1,
+		max_entries,
 		sizeof(struct fdb_entry),
 		0, // cache size
 		0, // priv size

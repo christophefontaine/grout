@@ -15,8 +15,7 @@ const struct gr_node_info *gr_node_info_get(rte_node_t) {
 	return NULL;
 }
 
-// Pool sized so a single packet can exhaust it. Optimal mempool sizes are
-// 2^n - 1.
+// Pool sized so a single packet can exhaust it.
 #define TRACE_TEST_POOL_SIZE 7
 
 static struct test_mbuf {

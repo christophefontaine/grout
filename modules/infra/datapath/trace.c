@@ -937,7 +937,7 @@ void gr_trace_clear(void) {
 static void trace_init(struct event_base *) {
 	trace_pool = rte_mempool_create(
 		"trace_items", // name
-		rte_align32pow2(PACKET_COUNT_MAX * 128) - 1,
+		PACKET_COUNT_MAX * 128,
 		sizeof(struct gr_trace_item),
 		0, // cache size
 		0, // priv size

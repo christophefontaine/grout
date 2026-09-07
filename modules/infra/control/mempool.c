@@ -76,7 +76,6 @@ struct rte_mempool *gr_pktmbuf_pool_get(int8_t socket_id, uint32_t count) {
 			alloc_size = mempool_default_size;
 			if (count > mempool_default_size / 4) {
 				alloc_size = count * 2;
-				alloc_size = rte_align32pow2(alloc_size) - 1;
 				// For future mempools, increase default size;
 				mempool_default_size = alloc_size;
 			}
