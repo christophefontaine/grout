@@ -630,7 +630,7 @@ static int iface_port_init(struct iface *iface, const void *api_info) {
 		return errno_set(EIDRM);
 
 	port->port_id = port_id;
-	if (rte_eth_dev_info_get(port_id, &info) < 0)
+	if ((ret = rte_eth_dev_info_get(port_id, &info)) < 0)
 		return errno_set(-ret);
 	port->virtio_offloads = strcmp(info.driver_name, "net_virtio") == 0
 		&& (info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TCP_CKSUM) != 0;
