@@ -255,14 +255,38 @@ In addition to physical (`vfio-pci`) and software (`net_tap`, `net_null`, ...)
 ports created with `interface add port ... devargs ...`, grout can create
 **VDUSE** ports. VDUSE (vDPA Device in Userspace) lets grout expose a virtio
 datapath entirely from userspace: the DPDK `net_vhost` PMD creates a
-`/dev/vduse/<name>` device.
+`/dev/vduse/<name>` device and grout instantiates the matching vDPA device and
+binds it to a driver.
+
+```console
+grout# interface add vduse ?
+  NAME       Interface name (also used as the vDPA device name).
+  mode       vDPA attach mode (default: host).
+  queues     Number of virtio queue pairs.
+  ...
+```
+
+Two modes are available:
+
+* `host` (default) — the vDPA device is bound to `virtio_vdpa`, which exposes a
+  virtio-net netdev in the host kernel. This netdev is a peer device (the other
+  end of the datapath, for use by host applications), distinct from grout's own
+  control plane TAP. grout renames it to a predictable `dp-` prefixed name (e.g.
+  `dp-vduse0`) so it does not collide with the control plane TAP, which keeps
+  the interface name (e.g. `vduse0`) like every other interface type.
+* `vm` — the vDPA device is bound to `vhost_vdpa`, which exposes a
+  `/dev/vhost-vdpa-*` character device that can be handed to a VM (e.g. QEMU
+  `-netdev vhost-vdpa`).
 
 ```console
 grout# interface add vduse vduse0
 grout# address add 172.16.0.1/24 iface vduse0
 ```
 
-VDUSE requires the `vduse` kernel module to be loaded.
+VDUSE requires the `vduse` and (for host mode) `virtio_vdpa` kernel modules to
+be loaded. grout instantiates and removes the underlying vDPA device
+automatically when the interface is created and deleted; no manual
+`vdpa dev add`/`del` is needed.
 
 ## Packet graph
 

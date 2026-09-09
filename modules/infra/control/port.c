@@ -11,6 +11,7 @@
 #include "netlink.h"
 #include "port.h"
 #include "rcu.h"
+#include "vdpa.h"
 #include "vec.h"
 #include "vrf.h"
 #include "worker.h"
@@ -115,8 +116,8 @@ int port_configure(struct iface_info_port *p, uint16_t n_txq_min) {
 	// cap number of queues to device maximum
 	p->n_txq = RTE_MIN(n_txq_min, info.max_tx_queues);
 
-	if (strcmp(info.driver_name, "net_tap") == 0
-	    || strcmp(info.driver_name, "net_virtio") == 0) {
+	if (strcmp(info.driver_name, "net_tap") == 0 || strcmp(info.driver_name, "net_virtio") == 0
+	    || strcmp(info.driver_name, "net_vhost") == 0) {
 		// force number of TX queues equal to requested RX queues
 		p->n_txq = p->n_rxq;
 		if (p->n_txq > info.max_tx_queues)
@@ -552,12 +553,97 @@ out:
 	port->linux_ifname = NULL;
 }
 
+#define VDUSE_PATH_PREFIX "/dev/vduse/"
+
+// Build the net_vhost devargs backing a VDUSE port. The DPDK vhost library
+// creates /dev/vduse/<name> when the iface path starts with /dev/vduse/, so the
+// VDUSE device name is simply the interface name (already validated on iface
+// creation).
+static int port_vduse_devargs(const char *name, uint16_t queues, char *buf, size_t size) {
+	if ((size_t)snprintf(
+		    buf,
+		    size,
+		    "net_vhost-%s,iface=" VDUSE_PATH_PREFIX "%s,queues=%u",
+		    name,
+		    name,
+		    queues ? queues : 1
+	    )
+	    >= size)
+		return errno_set(ENAMETOOLONG);
+	return 0;
+}
+
+// Datapath netdev name for a host-mode VDUSE port: the virtio_vdpa netdev is a
+// separate peer device from grout's control plane TAP (which keeps the plain
+// interface name like every other interface), so it gets a "dp-" prefix.
+#define VDUSE_DP_PREFIX "dp-"
+
+// Instantiate and bind the vDPA device backing a VDUSE port. Called once the
+// underlying net_vhost port is fully configured and started (the DPDK vhost
+// library has created /dev/vduse/<name> during rte_eth_dev_configure()).
+// Regular ports have an empty vduse_name, so this is a no-op on them; mode only
+// selects the vdpa driver to bind.
+static int port_vduse_attach(struct iface_info_port *port, gr_vduse_mode_t mode) {
+	const char *name = port->vduse_name;
+	const char *driver;
+	int ret;
+
+	// Not a VDUSE port: nothing to do.
+	if (name[0] == '\0')
+		return 0;
+
+	if ((ret = vdpa_dev_add(name)) < 0)
+		return ret;
+	port->vduse_attached = true;
+
+	// VM mode binds vhost_vdpa; host mode binds virtio_vdpa.
+	driver = mode == GR_VDUSE_MODE_VM ? VDPA_DRIVER_VHOST : VDPA_DRIVER_VIRTIO;
+	if ((ret = vdpa_bind_driver(name, driver)) < 0) {
+		vdpa_dev_del(name);
+		port->vduse_attached = false;
+		return ret;
+	}
+
+	// In host mode, virtio_vdpa exposes a kernel netdev with
+	// a default name (e.g. "eth0"). Rename it to a predictable "dp-<name>" so it
+	// does not collide with the interface's control plane TAP (which keeps the
+	// plain interface name). This is best effort: a failure here does not
+	// invalidate the port.
+	if (mode != GR_VDUSE_MODE_VM) {
+		char dp_name[IF_NAMESIZE];
+		if ((size_t)snprintf(dp_name, sizeof(dp_name), VDUSE_DP_PREFIX "%s", name)
+		    >= sizeof(dp_name))
+			LOG(WARNING, "vduse %s: name too long for a dp- datapath netdev", name);
+		else if (vdpa_rename_netdev(name, dp_name) < 0)
+			LOG(WARNING, "vdpa netdev rename %s: %s", name, strerror(errno));
+	}
+
+	return 0;
+}
+
+// Tear down the vDPA device backing a VDUSE port before the DPDK device that
+// created it is closed and removed.
+static void port_vduse_detach(struct iface_info_port *port) {
+	// Only delete a vDPA device that port_vduse_attach() actually created. This
+	// avoids a spurious "no such device" on teardown when attach never ran (e.g.
+	// a reconfig failure before attach) or already removed it (bind failure).
+	if (!port->vduse_attached)
+		return;
+	if (vdpa_dev_del(port->vduse_name) < 0)
+		LOG(WARNING, "vdpa dev del %s: %s", port->vduse_name, strerror(errno));
+	port->vduse_attached = false;
+}
+
 static int iface_port_fini(struct iface *iface) {
 	struct iface_info_port *port = iface_info_port(iface);
 	vec struct iface_info_port **ports = NULL;
 	struct rte_eth_dev_info info = {0};
 	struct iface *i = NULL;
 	int ret;
+
+	// Remove the vDPA device (if any) while the backing net_vhost port is still
+	// alive. port_vduse_detach() is a no-op for regular (non-VDUSE) ports.
+	port_vduse_detach(port);
 
 	if (worker_count() > 0) {
 		// unplug port from all workers
@@ -610,19 +696,36 @@ static int iface_port_init(struct iface *iface, const void *api_info) {
 	struct iface_info_port *port = iface_info_port(iface);
 	const struct gr_iface_info_port *api = api_info;
 	uint16_t port_id = RTE_MAX_ETHPORTS;
+	char vduse_devargs[GR_PORT_DEVARGS_SIZE];
 	struct rte_dev_iterator iterator;
 	struct rte_eth_dev_info info;
+	const char *devargs;
 	int ret;
 
-	RTE_ETH_FOREACH_MATCHING_DEV (port_id, api->devargs, &iterator) {
+	// A VDUSE port is created from a plain interface name: build the net_vhost
+	// devargs here rather than trusting the client to format a DPDK string. The
+	// interface name doubles as the VDUSE device name.
+	if (api->vduse_mode != GR_VDUSE_MODE_NONE) {
+		ret = port_vduse_devargs(
+			iface->name, api->n_rxq, vduse_devargs, sizeof(vduse_devargs)
+		);
+		if (ret < 0)
+			return ret;
+		devargs = vduse_devargs;
+		gr_strcpy(port->vduse_name, sizeof(port->vduse_name), iface->name);
+	} else {
+		devargs = api->devargs;
+	}
+
+	RTE_ETH_FOREACH_MATCHING_DEV (port_id, devargs, &iterator) {
 		rte_eth_iterator_cleanup(&iterator);
 		return errno_set(EEXIST);
 	}
 
-	if ((ret = rte_dev_probe(api->devargs)) < 0)
+	if ((ret = rte_dev_probe(devargs)) < 0)
 		return errno_set(-ret);
 
-	RTE_ETH_FOREACH_MATCHING_DEV (port_id, api->devargs, &iterator) {
+	RTE_ETH_FOREACH_MATCHING_DEV (port_id, devargs, &iterator) {
 		rte_eth_iterator_cleanup(&iterator);
 		break;
 	}
@@ -635,7 +738,7 @@ static int iface_port_init(struct iface *iface, const void *api_info) {
 	port->virtio_offloads = strcmp(info.driver_name, "net_virtio") == 0
 		&& (info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TCP_CKSUM) != 0;
 
-	port->devargs = strndup(api->devargs, GR_PORT_DEVARGS_SIZE);
+	port->devargs = strndup(devargs, GR_PORT_DEVARGS_SIZE);
 	if (port->devargs == NULL) {
 		ret = errno_set(ENOMEM);
 		goto fail;
@@ -650,6 +753,16 @@ static int iface_port_init(struct iface *iface, const void *api_info) {
 		goto fail;
 	}
 	port_ifaces[port_id] = iface;
+
+	// The net_vhost port is now started, so the DPDK vhost library has created
+	// the /dev/vduse/<name> device. Instantiate and bind the matching vDPA
+	// device (host kernel netdev or VM char device). No-op for regular ports.
+	if ((ret = port_vduse_attach(port, api->vduse_mode)) < 0) {
+		port_ifaces[port_id] = NULL;
+		iface_port_fini(iface);
+		errno = -ret;
+		goto fail;
+	}
 
 	return 0;
 fail:
@@ -773,6 +886,13 @@ static void port_to_api(void *info, const struct iface *iface) {
 	} else {
 		gr_strcpy(api->driver_name, sizeof(api->driver_name), "unknown");
 	}
+
+	// Report the vdpa bus driver bound to the VDUSE device, if any. The attach
+	// mode is a create-time input and is not echoed back.
+	api->vduse_mode = GR_VDUSE_MODE_NONE;
+	api->vdpa_driver[0] = '\0';
+	if (port->vduse_name[0] != '\0')
+		vdpa_current_driver(port->vduse_name, api->vdpa_driver, sizeof(api->vdpa_driver));
 }
 
 METRIC_GAUGE(m_rxqs, "iface_port_rxqs", "Number of RX queues.");

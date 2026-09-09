@@ -20,6 +20,8 @@ static void port_show(struct gr_api_client *, const struct gr_iface *iface, stru
 
 	gr_object_field(o, "devargs", 0, "%s", port->devargs);
 	gr_object_field(o, "driver", 0, "%s", port->driver_name);
+	if (port->vdpa_driver[0] != '\0')
+		gr_object_field(o, "vdpa", 0, "%s", port->vdpa_driver);
 	gr_object_field(o, "mac", 0, ETH_F, &port->mac);
 	gr_object_field(o, "n_rxq", GR_DISP_INT, "%u", port->n_rxq);
 	gr_object_field(o, "n_txq", GR_DISP_INT, "%u", port->n_txq);
@@ -74,92 +76,83 @@ err:
 	return 0;
 }
 
-static cmd_status_t port_add(struct gr_api_client *c, const struct ec_pnode *p) {
+// Send a filled-in interface-add request, report the created id and free the
+// response. Shared by the "port" and "vduse" add commands.
+static cmd_status_t
+iface_add_send(struct gr_api_client *c, const struct gr_iface_add_req *req, size_t len) {
 	const struct gr_iface_add_resp *resp;
-	struct gr_iface_add_req *req = NULL;
 	void *resp_ptr = NULL;
+
+	if (gr_api_client_send_recv(c, GR_IFACE_ADD, len, req, &resp_ptr) < 0)
+		return CMD_ERROR;
+
+	resp = resp_ptr;
+	printf("Created interface %u\n", resp->iface_id);
+	free(resp_ptr);
+	return CMD_SUCCESS;
+}
+
+static cmd_status_t port_add(struct gr_api_client *c, const struct ec_pnode *p) {
+	struct gr_iface_add_req *req = NULL;
+	cmd_status_t ret = CMD_ERROR;
 	size_t len;
 
 	len = sizeof(*req) + sizeof(struct gr_iface_info_port);
 	if ((req = calloc(1, len)) == NULL)
-		goto err;
+		goto out;
 
 	req->iface.type = GR_IFACE_TYPE_PORT;
 	req->iface.flags = GR_IFACE_F_UP;
 
 	if (parse_port_args(c, p, &req->iface, false) == 0)
-		goto err;
+		goto out;
 
-	if (gr_api_client_send_recv(c, GR_IFACE_ADD, len, req, &resp_ptr) < 0)
-		goto err;
-
+	ret = iface_add_send(c, req, len);
+out:
 	free(req);
-	resp = resp_ptr;
-	printf("Created interface %u\n", resp->iface_id);
-	free(resp_ptr);
-	return CMD_SUCCESS;
-err:
-	free(req);
-	return CMD_ERROR;
+	return ret;
 }
 
 static cmd_status_t vduse_add(struct gr_api_client *c, const struct ec_pnode *p) {
-	const struct gr_iface_add_resp *resp;
 	struct gr_iface_add_req *req = NULL;
 	struct gr_iface_info_port *port;
-	void *resp_ptr = NULL;
-	uint16_t queues = 1;
+	cmd_status_t ret = CMD_ERROR;
+	const char *mode;
 	size_t len;
 
 	len = sizeof(*req) + sizeof(struct gr_iface_info_port);
 	if ((req = calloc(1, len)) == NULL)
-		goto err;
+		goto out;
 
 	req->iface.type = GR_IFACE_TYPE_PORT;
 	req->iface.flags = GR_IFACE_F_UP;
 
 	if (parse_iface_args(c, p, &req->iface, sizeof(*port), false) == 0)
-		goto err;
+		goto out;
 
 	port = (struct gr_iface_info_port *)req->iface.info;
 
 	// Number of virtio queue pairs (defaults to 1).
-	arg_u16(p, "N_RXQ", &queues);
-	if (queues == 0)
-		queues = 1;
-	port->n_rxq = queues;
+	port->n_rxq = 1;
+	arg_u16(p, "N_RXQ", &port->n_rxq);
 
 	if (arg_u16(p, "Q_SIZE", &port->rxq_size) == 0)
 		port->txq_size = port->rxq_size;
 
 	arg_eth_addr(p, "MAC", &port->mac);
 
-	// Build the net_vhost devargs backed by a VDUSE device. DPDK creates
-	// /dev/vduse/<name> when the vhost iface path starts with /dev/vduse/.
-	if (snprintf(
-		    port->devargs,
-		    sizeof(port->devargs),
-		    "net_vhost-%s,iface=/dev/vduse/%s,queues=%u",
-		    req->iface.name,
-		    req->iface.name,
-		    queues
-	    )
-	    >= (int)sizeof(port->devargs)) {
-		errno = ENAMETOOLONG;
-		goto err;
-	}
+	// Mark the port as VDUSE and select the vdpa attach mode (default: host).
+	// The devargs is left empty on purpose: the control plane builds the
+	// net_vhost string from the interface name, so the CLI never has to format
+	// (and get wrong) DPDK device arguments.
+	port->vduse_mode = GR_VDUSE_MODE_HOST;
+	if ((mode = arg_str(p, "MODE")) != NULL && strcmp(mode, "vm") == 0)
+		port->vduse_mode = GR_VDUSE_MODE_VM;
 
-	if (gr_api_client_send_recv(c, GR_IFACE_ADD, len, req, &resp_ptr) < 0)
-		goto err;
-
+	ret = iface_add_send(c, req, len);
+out:
 	free(req);
-	resp = resp_ptr;
-	printf("Created interface %u\n", resp->iface_id);
-	free(resp_ptr);
-	return CMD_SUCCESS;
-err:
-	free(req);
-	return CMD_ERROR;
+	return ret;
 }
 
 static cmd_status_t port_set(struct gr_api_client *c, const struct ec_pnode *p) {
@@ -206,12 +199,27 @@ static int ctx_init(struct ec_node *root) {
 		return ret;
 	ret = CLI_COMMAND(
 		INTERFACE_ADD_CTX(root),
-		"vduse NAME [(queues N_RXQ),(qsize Q_SIZE),(mac MAC)," IFACE_ATTRS_CMD "]",
+		"vduse NAME [(mode MODE),(queues N_RXQ),(qsize Q_SIZE),(mac MAC)," IFACE_ATTRS_CMD
+		"]",
 		vduse_add,
 		"Create a VDUSE port (net_vhost backed by a vDPA device in userspace).",
 		with_help(
 			"Interface name (also used as the vDPA device name).",
 			ec_node("any", "NAME")
+		),
+		with_help(
+			"vDPA attach mode (default: host).",
+			EC_NODE_OR(
+				"MODE",
+				with_help(
+					"Expose a virtio-net netdev in the host kernel.",
+					ec_node_str("", "host")
+				),
+				with_help(
+					"Expose a vhost-vdpa device for a VM.",
+					ec_node_str("", "vm")
+				)
+			)
 		),
 		with_help(
 			"Number of virtio queue pairs.",

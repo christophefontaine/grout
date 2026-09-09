@@ -47,7 +47,16 @@ void event_push(uint32_t, const void *) { }
 int netlink_link_set_name(uint32_t, const char *) {
 	return 0;
 }
+int netlink_link_set_admin_state(uint32_t, bool, bool) {
+	return 0;
+}
 int netlink_set_ifalias(uint32_t, const char *) {
+	return 0;
+}
+int netlink_vdpa_dev_add(const char *) {
+	return 0;
+}
+int netlink_vdpa_dev_del(const char *) {
 	return 0;
 }
 mock_func(struct rte_mempool *, gr_pktmbuf_pool_get(int8_t, uint32_t));

@@ -102,6 +102,21 @@ struct gr_iface {
 #define GR_PORT_SET_Q_SIZE GR_BIT64(34)
 #define GR_PORT_SET_MAC GR_BIT64(35)
 
+// VDUSE (vDPA Device in Userspace) attach mode for a port (GR_IFACE_ADD input).
+//
+// A VDUSE port is a net_vhost DPDK port whose vhost backend is a VDUSE device
+// (iface=/dev/vduse/<name>). Once created, grout instantiates the matching vDPA
+// device and binds it to a kernel driver:
+//   HOST -> virtio-vdpa: exposes a virtio-net netdev in the host kernel, usable
+//           by any local application through the regular network stack.
+//   VM   -> vhost-vdpa:  exposes a /dev/vhost-vdpa-* character device that can
+//           be handed to a VM (e.g. QEMU) for a near-passthrough datapath.
+typedef enum : uint8_t {
+	GR_VDUSE_MODE_NONE = 0, // Unset (regular DPDK port, or no mode requested).
+	GR_VDUSE_MODE_HOST, // Bind to virtio-vdpa (host kernel netdev).
+	GR_VDUSE_MODE_VM, // Bind to vhost-vdpa (device for a VM).
+} gr_vduse_mode_t;
+
 // Base info structure for GR_IFACE_TYPE_PORT interfaces.
 struct __gr_iface_info_port_base {
 	uint16_t n_rxq;
@@ -119,6 +134,15 @@ struct gr_iface_info_port {
 	char devargs[GR_PORT_DEVARGS_SIZE];
 #define GR_PORT_DRIVER_NAME_SIZE 32
 	char driver_name[GR_PORT_DRIVER_NAME_SIZE];
+	// gr_vduse_mode_t, GR_IFACE_ADD input only: NONE creates a regular DPDK port
+	// from "devargs"; HOST or VM marks the port as VDUSE (the control plane
+	// builds the net_vhost devargs from the interface name, so "devargs" is left
+	// empty) and selects the vdpa driver to bind.
+	uint8_t vduse_mode;
+	// vdpa bus driver bound to the VDUSE device in list/get responses (e.g.
+	// "virtio_vdpa" or "vhost_vdpa"), empty for non-VDUSE ports.
+#define GR_VDPA_DRIVER_NAME_SIZE 32
+	char vdpa_driver[GR_VDPA_DRIVER_NAME_SIZE];
 };
 
 // Reserved name for the auto-created default VRF.

@@ -28,3 +28,9 @@ int netlink_set_addr_gen_mode_none(uint32_t ifindex);
 int netlink_set_ifalias(uint32_t ifindex, const char *ifalias);
 int netlink_get_ifalias(const char *ifname, char *buf, size_t len);
 int netlink_link_get_kind(const char *ifname, char *buf, size_t len);
+
+// vDPA lifecycle over generic netlink (NETLINK_GENERIC / VDPA_GENL_NAME).
+// Instantiate ("vdpa dev add name <name> mgmtdev vduse") or remove
+// ("vdpa dev del name <name>") a vDPA device from the "vduse" management device.
+int netlink_vdpa_dev_add(const char *name);
+int netlink_vdpa_dev_del(const char *name);

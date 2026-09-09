@@ -12,6 +12,7 @@
 #include <rte_mempool.h>
 #include <rte_spinlock.h>
 
+#include <net/if.h>
 #include <stdint.h>
 
 GR_IFACE_INFO(GR_IFACE_TYPE_PORT, iface_info_port, {
@@ -20,6 +21,9 @@ GR_IFACE_INFO(GR_IFACE_TYPE_PORT, iface_info_port, {
 	uint16_t port_id;
 	bool started;
 	bool needs_reset;
+	// VDUSE device name (== interface name), empty for a regular port.
+	char vduse_name[IF_NAMESIZE];
+	bool vduse_attached; // a vDPA device was created for this port (VDUSE)
 	struct rte_mempool *pool;
 	char *devargs;
 	char *linux_ifname;

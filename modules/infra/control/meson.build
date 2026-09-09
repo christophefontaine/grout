@@ -15,6 +15,7 @@ src += files(
   'netlink.c',
   'nexthop.c',
   'port.c',
+  'vdpa.c',
   'vlan.c',
   'vrf.c',
   'worker.c',
@@ -23,7 +24,7 @@ inc += include_directories('.')
 
 tests += [
   {
-    'sources': files('worker_test.c', 'port.c', 'worker.c'),
+    'sources': files('worker_test.c', 'port.c', 'vdpa.c', 'worker.c'),
     'link_args': [
       '-Wl,--wrap=numa_available',
       '-Wl,--wrap=numa_node_of_cpu',
@@ -49,7 +50,7 @@ tests += [
     ],
   },
   {
-    'sources': files('iface_test.c', 'iface.c', 'port.c', 'vlan.c'),
+    'sources': files('iface_test.c', 'iface.c', 'port.c', 'vdpa.c', 'vlan.c'),
     'link_args': [
       '-Wl,--wrap=iface_from_id',
       '-Wl,--wrap=rte_eth_allmulticast_enable',

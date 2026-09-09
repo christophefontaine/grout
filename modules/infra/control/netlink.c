@@ -16,10 +16,12 @@
 
 #include <libmnl/libmnl.h>
 #include <linux/fib_rules.h>
+#include <linux/genetlink.h>
 #include <linux/if_addr.h>
 #include <linux/if_link.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/vdpa.h>
 #include <net/if.h>
 #include <string.h>
 
@@ -710,6 +712,135 @@ int netlink_link_set_mac(uint32_t ifindex, const struct rte_ether_addr *mac) {
 	mnl_attr_put(nlh, IFLA_ADDRESS, RTE_ETHER_ADDR_LEN, mac);
 
 	return netlink_send_req(nlh);
+}
+
+// Name of the vDPA management device registered by the kernel vduse module.
+#define VDUSE_MGMTDEV "vduse"
+
+static int genl_family_id_cb(const struct nlmsghdr *nlh, void *data) {
+	const struct genlmsghdr *genl = mnl_nlmsg_get_payload(nlh);
+	uint16_t *family_id = data;
+	const struct nlattr *attr;
+
+	mnl_attr_for_each(attr, nlh, sizeof(*genl)) {
+		if (mnl_attr_get_type(attr) == CTRL_ATTR_FAMILY_ID)
+			*family_id = mnl_attr_get_u16(attr);
+	}
+	return MNL_CB_OK;
+}
+
+// Resolve the generic netlink family id for the given family name.
+// Returns -ENOENT if the family is not registered (e.g. vdpa module not loaded).
+static int genl_family_id(struct mnl_socket *nl, const char *name, uint16_t *family_id) {
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	struct genlmsghdr *genl;
+	struct nlmsghdr *nlh;
+	unsigned int portid;
+	int ret;
+
+	nlh = mnl_nlmsg_put_header(buf);
+	nlh->nlmsg_type = GENL_ID_CTRL;
+	nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	nlh->nlmsg_seq = 1;
+	genl = mnl_nlmsg_put_extra_header(nlh, sizeof(*genl));
+	genl->cmd = CTRL_CMD_GETFAMILY;
+	genl->version = 1;
+	mnl_attr_put_u16(nlh, CTRL_ATTR_FAMILY_ID, GENL_ID_CTRL);
+	mnl_attr_put_strz(nlh, CTRL_ATTR_FAMILY_NAME, name);
+
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0)
+		return -errno;
+
+	portid = mnl_socket_get_portid(nl);
+	*family_id = 0;
+	while ((ret = mnl_socket_recvfrom(nl, buf, sizeof(buf))) > 0) {
+		ret = mnl_cb_run(buf, ret, 1, portid, genl_family_id_cb, family_id);
+		if (ret <= MNL_CB_STOP)
+			break;
+	}
+	if (ret < 0)
+		return -errno;
+	if (*family_id == 0)
+		return -ENOENT;
+
+	return 0;
+}
+
+// Send a VDPA_CMD_DEV_{NEW,DEL} command on a dedicated generic netlink socket
+// and wait for its ACK. The vdpa genl family is netnsok=false, so this must run
+// in the initial network namespace.
+static int netlink_vdpa_dev_cmd(uint8_t cmd, const char *name) {
+	// The vdpa genl family id is stable for the lifetime of the loaded module,
+	// so resolve it once and reuse it across add/del calls (0 = unresolved).
+	static uint16_t family_id;
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	struct genlmsghdr *genl;
+	struct mnl_socket *nl;
+	struct nlmsghdr *nlh;
+	unsigned int portid;
+	int ret;
+
+	nl = mnl_socket_open(NETLINK_GENERIC);
+	if (nl == NULL)
+		return errno_log(errno, "mnl_socket_open(NETLINK_GENERIC)");
+	if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
+		ret = errno_log(errno, "mnl_socket_bind");
+		goto out;
+	}
+
+	if (family_id == 0) {
+		ret = genl_family_id(nl, VDPA_GENL_NAME, &family_id);
+		if (ret < 0) {
+			if (ret == -ENOENT)
+				LOG(ERR,
+				    "vdpa netlink family not found (is the vduse module loaded?)");
+			ret = errno_set(-ret);
+			goto out;
+		}
+	}
+
+	nlh = mnl_nlmsg_put_header(buf);
+	nlh->nlmsg_type = family_id;
+	nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	nlh->nlmsg_seq = 2;
+	genl = mnl_nlmsg_put_extra_header(nlh, sizeof(*genl));
+	genl->cmd = cmd;
+	genl->version = VDPA_GENL_VERSION;
+
+	if (cmd == VDPA_CMD_DEV_NEW)
+		mnl_attr_put_strz(nlh, VDPA_ATTR_MGMTDEV_DEV_NAME, VDUSE_MGMTDEV);
+	mnl_attr_put_strz(nlh, VDPA_ATTR_DEV_NAME, name);
+
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+		ret = errno_log(errno, "mnl_socket_sendto");
+		goto out;
+	}
+
+	portid = mnl_socket_get_portid(nl);
+	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	if (ret < 0) {
+		ret = errno_log(errno, "mnl_socket_recvfrom");
+		goto out;
+	}
+	// NLMSG_ERROR (including the ACK) is decoded here: a non-zero error sets
+	// errno and makes mnl_cb_run return -1.
+	ret = mnl_cb_run(buf, ret, 2, portid, NULL, NULL);
+	if (ret < 0) {
+		ret = errno_set(errno);
+		goto out;
+	}
+	ret = 0;
+out:
+	mnl_socket_close(nl);
+	return ret;
+}
+
+int netlink_vdpa_dev_add(const char *name) {
+	return netlink_vdpa_dev_cmd(VDPA_CMD_DEV_NEW, name);
+}
+
+int netlink_vdpa_dev_del(const char *name) {
+	return netlink_vdpa_dev_cmd(VDPA_CMD_DEV_DEL, name);
 }
 
 static void netlink_init(struct event_base *) {
