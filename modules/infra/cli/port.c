@@ -103,6 +103,65 @@ err:
 	return CMD_ERROR;
 }
 
+static cmd_status_t vduse_add(struct gr_api_client *c, const struct ec_pnode *p) {
+	const struct gr_iface_add_resp *resp;
+	struct gr_iface_add_req *req = NULL;
+	struct gr_iface_info_port *port;
+	void *resp_ptr = NULL;
+	uint16_t queues = 1;
+	size_t len;
+
+	len = sizeof(*req) + sizeof(struct gr_iface_info_port);
+	if ((req = calloc(1, len)) == NULL)
+		goto err;
+
+	req->iface.type = GR_IFACE_TYPE_PORT;
+	req->iface.flags = GR_IFACE_F_UP;
+
+	if (parse_iface_args(c, p, &req->iface, sizeof(*port), false) == 0)
+		goto err;
+
+	port = (struct gr_iface_info_port *)req->iface.info;
+
+	// Number of virtio queue pairs (defaults to 1).
+	arg_u16(p, "N_RXQ", &queues);
+	if (queues == 0)
+		queues = 1;
+	port->n_rxq = queues;
+
+	if (arg_u16(p, "Q_SIZE", &port->rxq_size) == 0)
+		port->txq_size = port->rxq_size;
+
+	arg_eth_addr(p, "MAC", &port->mac);
+
+	// Build the net_vhost devargs backed by a VDUSE device. DPDK creates
+	// /dev/vduse/<name> when the vhost iface path starts with /dev/vduse/.
+	if (snprintf(
+		    port->devargs,
+		    sizeof(port->devargs),
+		    "net_vhost-%s,iface=/dev/vduse/%s,queues=%u",
+		    req->iface.name,
+		    req->iface.name,
+		    queues
+	    )
+	    >= (int)sizeof(port->devargs)) {
+		errno = ENAMETOOLONG;
+		goto err;
+	}
+
+	if (gr_api_client_send_recv(c, GR_IFACE_ADD, len, req, &resp_ptr) < 0)
+		goto err;
+
+	free(req);
+	resp = resp_ptr;
+	printf("Created interface %u\n", resp->iface_id);
+	free(resp_ptr);
+	return CMD_SUCCESS;
+err:
+	free(req);
+	return CMD_ERROR;
+}
+
 static cmd_status_t port_set(struct gr_api_client *c, const struct ec_pnode *p) {
 	struct gr_iface_set_req *req = NULL;
 	cmd_status_t ret = CMD_ERROR;
@@ -142,6 +201,25 @@ static int ctx_init(struct ec_node *root) {
 		with_help("Interface name.", ec_node("any", "NAME")),
 		with_help("DPDK device args.", ec_node("devargs", "DEVARGS")),
 		PORT_ATTRS_ARGS
+	);
+	if (ret < 0)
+		return ret;
+	ret = CLI_COMMAND(
+		INTERFACE_ADD_CTX(root),
+		"vduse NAME [(queues N_RXQ),(qsize Q_SIZE),(mac MAC)," IFACE_ATTRS_CMD "]",
+		vduse_add,
+		"Create a VDUSE port (net_vhost backed by a vDPA device in userspace).",
+		with_help(
+			"Interface name (also used as the vDPA device name).",
+			ec_node("any", "NAME")
+		),
+		with_help(
+			"Number of virtio queue pairs.",
+			ec_node_uint("N_RXQ", 1, UINT16_MAX - 1, 10)
+		),
+		with_help("Rx/Tx queues size.", ec_node_uint("Q_SIZE", 0, UINT16_MAX - 1, 10)),
+		with_help("Set the ethernet address.", ec_node_re("MAC", ETH_ADDR_RE)),
+		IFACE_ATTRS_ARGS
 	);
 	if (ret < 0)
 		return ret;

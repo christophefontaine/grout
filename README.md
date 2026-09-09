@@ -35,6 +35,7 @@ also in scripts one command at a time, or by batches.
 * VXLAN tunnels
 * Bond/LACP interfaces
 * IP in IP tunnels
+* VDUSE ports (virtio datapath in userspace, host netdev or VM passthrough)
 * SRv6
 * DHCP client
 * Static IPv4 DNAT
@@ -247,6 +248,21 @@ eth_output  333675  22623757       67.8       1323.4        19.5
 ip_output   333675  22623757       67.8        926.3        13.7
 ip_forward  333675  22623757       67.8        691.8        10.2
 ```
+
+## VDUSE ports
+
+In addition to physical (`vfio-pci`) and software (`net_tap`, `net_null`, ...)
+ports created with `interface add port ... devargs ...`, grout can create
+**VDUSE** ports. VDUSE (vDPA Device in Userspace) lets grout expose a virtio
+datapath entirely from userspace: the DPDK `net_vhost` PMD creates a
+`/dev/vduse/<name>` device.
+
+```console
+grout# interface add vduse vduse0
+grout# address add 172.16.0.1/24 iface vduse0
+```
+
+VDUSE requires the `vduse` kernel module to be loaded.
 
 ## Packet graph
 
