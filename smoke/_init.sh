@@ -400,7 +400,15 @@ if [ "$run_grout" = true ]; then
 	# try to spread load on all CPUs
 	cpu="$(($RANDOM % ($(nproc) - 1)))"
 	affinity="$cpu,$((cpu+1))"
-	local_grout_cmd="taskset -c $affinity grout $grout_extra_options"
+	# Some datapaths (e.g. VDUSE/vDPA) rely on kernel netlink families that
+	# are only exposed in the initial network namespace. Such tests can set
+	# grout_netns=host to run grout in the host netns (bound to /run/netns/host
+	# by this harness) instead of the unshared one.
+	grout_ns_prefix=""
+	if [ -n "${grout_netns:-}" ]; then
+		grout_ns_prefix="ip netns exec $grout_netns "
+	fi
+	local_grout_cmd="${grout_ns_prefix}taskset -c $affinity grout $grout_extra_options"
 	if [ "${GDB:-false}" = true ]; then
 		tmux new-window -d -n gdb gdb \
 			-ex 'handle SIGTERM nostop print pass' \
