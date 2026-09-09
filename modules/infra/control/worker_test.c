@@ -59,6 +59,9 @@ int netlink_vdpa_dev_add(const char *) {
 int netlink_vdpa_dev_del(const char *) {
 	return 0;
 }
+int netlink_link_move_netns(uint32_t, const char *, int) {
+	return 0;
+}
 mock_func(struct rte_mempool *, gr_pktmbuf_pool_get(int8_t, uint32_t));
 void gr_pktmbuf_pool_release(struct rte_mempool *, uint32_t) { }
 struct rte_mempool *gr_pktmbuf_pool_resize(struct rte_mempool *mp, int8_t, uint32_t, uint32_t) {

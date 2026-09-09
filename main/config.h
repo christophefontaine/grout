@@ -41,6 +41,12 @@ struct gr_config {
 	uint32_t port_queue_size;
 	const char *fib4_algorithm;
 	const char *fib6_algorithm;
+	// Network namespace where the kernel vdpa generic-netlink family lives
+	// (its initial netns). Only needed when grout runs isolated in its own
+	// netns (e.g. a container): set GROUT_VDPA_NETNS to a bind-mounted
+	// reference to that netns so grout can create VDUSE/vdpa devices there.
+	// NULL => grout's current netns already has vdpa access.
+	const char *vdpa_netns;
 };
 
 extern struct gr_config gr_config;

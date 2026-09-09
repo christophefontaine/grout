@@ -4,6 +4,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 // Helpers to drive the kernel vDPA subsystem for VDUSE ports.
 //
@@ -40,3 +41,22 @@ void vdpa_current_driver(const char *name, char *buf, size_t size);
 // (e.g. "eth0"); renaming it to a predictable name (e.g. "dp-<iface>") keeps
 // it distinct from the interface's control plane TAP.
 int vdpa_rename_netdev(const char *name, const char *new_name);
+
+// Return the ifindex of the host kernel netdev created by virtio_vdpa for the
+// given vDPA device, resolved in the caller's current netns, or 0 if not found.
+uint32_t vdpa_netdev_ifindex(const char *name);
+
+// Enter the network namespace where the kernel vdpa generic-netlink family
+// lives (its initial netns) so vdpa operations succeed when grout runs isolated
+// in its own netns. netns_path is a bind-mounted reference to that netns
+// (GROUT_VDPA_NETNS); NULL means grout's current netns already has vdpa access,
+// in which case this is a no-op.
+//
+// On success *prev_fd is set to an open fd for the caller's previous netns (to
+// pass to vdpa_netns_leave), or -1 when no namespace switch happened. Returns a
+// negative errno on failure.
+int vdpa_netns_enter(const char *netns_path, int *prev_fd);
+
+// Return to the netns saved by vdpa_netns_enter() and close prev_fd. A negative
+// prev_fd (no switch happened) is a no-op.
+void vdpa_netns_leave(int prev_fd);

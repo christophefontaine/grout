@@ -13,9 +13,13 @@
 # address on the port through it.
 #
 # The kernel vdpa generic-netlink family is only exposed in the initial network
-# namespace, so grout must run there (grout_netns=host) rather than in the
-# unshared netns the harness creates for every other test.
-grout_netns=host
+# namespace. Rather than running grout there, this exercises the isolated
+# deployment: grout runs in the unshared netns the harness creates for every
+# test, and GROUT_VDPA_NETNS points it at a bind-mounted reference to the initial
+# netns (/run/netns/host, set up by _init.sh) so it can enter it for vdpa
+# operations. In host mode grout then moves the peer netdev back into its own
+# netns, where the control plane TAP also lives.
+export GROUT_VDPA_NETNS=/run/netns/host
 
 . $(dirname $0)/_init.sh
 
@@ -32,7 +36,8 @@ name=vduse0
 dp_name="dp-$name"
 
 # Best effort cleanup of anything a previous aborted run may have left behind:
-# the vduse device and vdpa device are global (not netns scoped).
+# the vduse device and vdpa device are global (not netns scoped), but the vdpa
+# netlink family is only reachable from the initial netns (/run/netns/host).
 if command -v vdpa >/dev/null; then
 	ip netns exec host vdpa dev del "$name" 2>/dev/null || :
 fi
@@ -48,16 +53,21 @@ grcli interface add vduse "$name"
 grcli address add 172.16.0.1/24 iface "$name"
 grcli address add fd00:ba4::1/64 iface "$name"
 
-# grout runs in the host netns, so its control plane TAP and the host-facing
-# datapath netdev are both created there. The control plane TAP keeps the
-# interface name like every other interface; the datapath netdev (the peer
-# virtio-net device) is renamed to "dp-<name>" to avoid a collision.
+# grout runs in the unshared netns, so its control plane TAP lives there. The
+# control plane TAP keeps the interface name like every other interface; the
+# datapath netdev (the peer virtio-net device) is created by virtio_vdpa in the
+# initial netns, moved by grout into its own (unshared) netns, and renamed to
+# "dp-<name>" to avoid a collision.
 SECONDS=0
-while ! ip -n host link show "$name" >/dev/null 2>&1; do
+while ! ip link show "$name" >/dev/null 2>&1; do
 	[ "$SECONDS" -gt 5 ] && fail "control plane tap $name not created"
 	sleep 0.2
 done
-ip -n host link show "$dp_name" >/dev/null 2>&1 || fail "datapath netdev $dp_name not created"
+SECONDS=0
+while ! ip link show "$dp_name" >/dev/null 2>&1; do
+	[ "$SECONDS" -gt 5 ] && fail "datapath netdev $dp_name not moved into grout's netns"
+	sleep 0.2
+done
 
 # Sanity: grcli must report the interface as a net_vhost port backed by a
 # VDUSE device. (Host mode specifically is already proven by the datapath
@@ -67,11 +77,10 @@ grcli -j interface show | jq -e \
 		| .info | test("iface=/dev/vduse/")' \
 	|| fail "$name not reported as a vduse-backed port"
 
-# Move the datapath frontend out of the host netns into its own netns, away
-# from grout's control plane tap, so the ping really traverses the vduse
-# datapath.
+# Move the datapath frontend into its own netns, away from grout's control
+# plane tap, so the ping really traverses the vduse datapath.
 netns_add n0
-ip -n host link set "$dp_name" netns n0
+ip link set "$dp_name" netns n0
 ip -n n0 link set "$dp_name" up
 ip -n n0 addr add 172.16.0.2/24 dev "$dp_name"
 ip -n n0 addr add fd00:ba4::2/64 dev "$dp_name"

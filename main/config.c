@@ -285,6 +285,7 @@ int config_parse(int argc, char **argv) {
 	ENV_INT(port_queue_size, "GROUT_PORT_QUEUE_SIZE", 0, 0, 16384);
 	ENV_STR(fib4_algorithm, "GROUT_FIB4_ALGORITHM", "DIR24_8");
 	ENV_STR(fib6_algorithm, "GROUT_FIB6_ALGORITHM", "TRIE");
+	ENV_STR(vdpa_netns, "GROUT_VDPA_NETNS", NULL);
 
 	// CLI flags override environment
 	while ((c = getopt_long(argc, argv, FLAGS, long_options, NULL)) != -1) {
@@ -372,4 +373,5 @@ void config_print(void) {
 	LOG(INFO, "GROUT_PORT_QUEUE_SIZE=%u", gr_config.port_queue_size);
 	LOG(INFO, "GROUT_FIB4_ALGORITHM=%s", gr_config.fib4_algorithm);
 	LOG(INFO, "GROUT_FIB6_ALGORITHM=%s", gr_config.fib6_algorithm);
+	LOG(INFO, "GROUT_VDPA_NETNS=%s", gr_config.vdpa_netns ?: "");
 }

@@ -586,14 +586,22 @@ static int port_vduse_devargs(const char *name, uint16_t queues, char *buf, size
 static int port_vduse_attach(struct iface_info_port *port, gr_vduse_mode_t mode) {
 	const char *name = port->vduse_name;
 	const char *driver;
+	int prev_ns = -1;
 	int ret;
 
 	// Not a VDUSE port: nothing to do.
 	if (name[0] == '\0')
 		return 0;
 
-	if ((ret = vdpa_dev_add(name)) < 0)
+	// vdpa operations (generic netlink) only succeed in the netns where the
+	// kernel vdpa family lives (its initial netns). When grout runs isolated
+	// in its own netns, enter the operator-provided vdpa netns first; this is
+	// a no-op (prev_ns stays -1) when GROUT_VDPA_NETNS is unset.
+	if ((ret = vdpa_netns_enter(gr_config.vdpa_netns, &prev_ns)) < 0)
 		return ret;
+
+	if ((ret = vdpa_dev_add(name)) < 0)
+		goto out;
 	port->vduse_attached = true;
 
 	// VM mode binds vhost_vdpa; host mode binds virtio_vdpa.
@@ -601,36 +609,63 @@ static int port_vduse_attach(struct iface_info_port *port, gr_vduse_mode_t mode)
 	if ((ret = vdpa_bind_driver(name, driver)) < 0) {
 		vdpa_dev_del(name);
 		port->vduse_attached = false;
-		return ret;
+		goto out;
 	}
 
-	// In host mode, virtio_vdpa exposes a kernel netdev with
-	// a default name (e.g. "eth0"). Rename it to a predictable "dp-<name>" so it
-	// does not collide with the interface's control plane TAP (which keeps the
-	// plain interface name). This is best effort: a failure here does not
-	// invalidate the port.
+	// In host mode, virtio_vdpa creates a kernel netdev with a default name
+	// (e.g. "eth0") in the current (vdpa) netns. Rename it to a predictable
+	// "dp-<name>" so it does not collide with the interface's control plane TAP
+	// (which keeps the plain interface name). This must be handled while still
+	// in the vdpa netns, where the netdev lives and its sysfs net/ entry is
+	// resolvable. Best effort: a failure here does not invalidate the port.
 	if (mode != GR_VDUSE_MODE_VM) {
 		char dp_name[IF_NAMESIZE];
 		if ((size_t)snprintf(dp_name, sizeof(dp_name), VDUSE_DP_PREFIX "%s", name)
-		    >= sizeof(dp_name))
+		    >= sizeof(dp_name)) {
 			LOG(WARNING, "vduse %s: name too long for a dp- datapath netdev", name);
-		else if (vdpa_rename_netdev(name, dp_name) < 0)
+		} else if (prev_ns >= 0) {
+			// Isolated: the shared netlink socket is bound to grout's home
+			// netns and cannot see this netdev, so rename and move it into
+			// grout's netns using a dedicated socket bound here.
+			uint32_t ifindex = vdpa_netdev_ifindex(name);
+			if (ifindex == 0)
+				LOG(WARNING, "vduse %s: cannot find peer netdev", name);
+			else if (netlink_link_move_netns(ifindex, dp_name, prev_ns) < 0)
+				LOG(WARNING,
+				    "vduse %s: rename+move netdev to grout netns: %s",
+				    name,
+				    strerror(errno));
+		} else if (vdpa_rename_netdev(name, dp_name) < 0) {
+			// Same netns as grout: rename via the shared netlink socket.
 			LOG(WARNING, "vdpa netdev rename %s: %s", name, strerror(errno));
+		}
 	}
 
-	return 0;
+	ret = 0;
+out:
+	vdpa_netns_leave(prev_ns);
+	return ret;
 }
 
 // Tear down the vDPA device backing a VDUSE port before the DPDK device that
 // created it is closed and removed.
 static void port_vduse_detach(struct iface_info_port *port) {
+	int prev_ns = -1;
+
 	// Only delete a vDPA device that port_vduse_attach() actually created. This
 	// avoids a spurious "no such device" on teardown when attach never ran (e.g.
 	// a reconfig failure before attach) or already removed it (bind failure).
 	if (!port->vduse_attached)
 		return;
+
+	// "vdpa dev del" must run in the vdpa netns, like "vdpa dev add" did.
+	if (vdpa_netns_enter(gr_config.vdpa_netns, &prev_ns) < 0) {
+		LOG(WARNING, "vduse %s: cannot enter vdpa netns for teardown", port->vduse_name);
+		return;
+	}
 	if (vdpa_dev_del(port->vduse_name) < 0)
 		LOG(WARNING, "vdpa dev del %s: %s", port->vduse_name, strerror(errno));
+	vdpa_netns_leave(prev_ns);
 	port->vduse_attached = false;
 }
 

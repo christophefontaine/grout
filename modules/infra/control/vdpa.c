@@ -13,9 +13,12 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <net/if.h>
+#include <sched.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 LOG_TYPE("vdpa");
@@ -153,6 +156,71 @@ static int vdpa_netdev_name(const char *name, char *buf, size_t size) {
 	closedir(dev_dir);
 
 	return ret;
+}
+
+uint32_t vdpa_netdev_ifindex(const char *name) {
+	char cur[IF_NAMESIZE];
+
+	if (vdpa_netdev_name(name, cur, sizeof(cur)) < 0)
+		return 0;
+	return if_nametoindex(cur);
+}
+
+// Whether two open netns fds refer to the same network namespace.
+static bool same_netns(int a, int b) {
+	struct stat sa, sb;
+
+	if (fstat(a, &sa) < 0 || fstat(b, &sb) < 0)
+		return false;
+	return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
+int vdpa_netns_enter(const char *netns_path, int *prev_fd) {
+	int target, prev, ret;
+
+	*prev_fd = -1;
+
+	// No vdpa netns configured: grout's current netns already has vdpa
+	// access (bare metal or --net=host). Nothing to do.
+	if (netns_path == NULL)
+		return 0;
+
+	target = open(netns_path, O_RDONLY | O_CLOEXEC);
+	if (target < 0)
+		return errno_log(errno, netns_path);
+
+	prev = open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
+	if (prev < 0) {
+		ret = errno_log(errno, "/proc/self/ns/net");
+		close(target);
+		return ret;
+	}
+
+	// Already in the vdpa netns (e.g. the reference points at our own netns):
+	// no setns needed and nothing to restore.
+	if (same_netns(target, prev)) {
+		close(target);
+		close(prev);
+		return 0;
+	}
+
+	if (setns(target, CLONE_NEWNET) < 0) {
+		ret = errno_log(errno, "setns");
+		close(target);
+		close(prev);
+		return ret;
+	}
+	close(target);
+	*prev_fd = prev;
+	return 0;
+}
+
+void vdpa_netns_leave(int prev_fd) {
+	if (prev_fd < 0)
+		return;
+	if (setns(prev_fd, CLONE_NEWNET) < 0)
+		LOG(ERR, "setns back: %s", strerror(errno));
+	close(prev_fd);
 }
 
 int vdpa_rename_netdev(const char *name, const char *new_name) {

@@ -28,6 +28,11 @@ int netlink_set_addr_gen_mode_none(uint32_t ifindex);
 int netlink_set_ifalias(uint32_t ifindex, const char *ifalias);
 int netlink_get_ifalias(const char *ifname, char *buf, size_t len);
 int netlink_link_get_kind(const char *ifname, char *buf, size_t len);
+// Move an interface into the netns referenced by netns_fd (IFLA_NET_NS_FD),
+// optionally renaming it first (new_name != NULL brings it down and renames it
+// before the move). Operates on a private socket bound to the caller's current
+// netns, so it can act on an interface in a netns entered via setns().
+int netlink_link_move_netns(uint32_t ifindex, const char *new_name, int netns_fd);
 
 // vDPA lifecycle over generic netlink (NETLINK_GENERIC / VDPA_GENL_NAME).
 // Instantiate ("vdpa dev add name <name> mgmtdev vduse") or remove

@@ -288,6 +288,16 @@ be loaded. grout instantiates and removes the underlying vDPA device
 automatically when the interface is created and deleted; no manual
 `vdpa dev add`/`del` is needed.
 
+The kernel vDPA generic-netlink family is only reachable from the initial
+network namespace. When grout runs in its own network namespace (e.g. an
+isolated container), point it at that netns with `GROUT_VDPA_NETNS`: it must be
+a bind-mounted reference to the initial netns (for example `/run/netns/host`
+created with `mount --bind /proc/1/ns/net /run/netns/host`), and grout needs
+`CAP_SYS_ADMIN` to enter it. grout enters that netns only for the vdpa
+operations, and in host mode moves the peer `dp-<name>` netdev back into its own
+netns. When unset (bare metal, or `--net=host`), grout uses its current netns
+and no bind mount is required.
+
 ## Packet graph
 
 Dump the packet graph (excluding all error nodes) and convert it to an SVG

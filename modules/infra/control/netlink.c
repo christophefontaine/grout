@@ -835,6 +835,97 @@ out:
 	return ret;
 }
 
+// Send one RTM_SETLINK request on a private socket and wait for its ACK. The
+// caller fills the message on the socket's buffer; portid is the socket's.
+static int setlink_send(struct mnl_socket *nl, struct nlmsghdr *nlh) {
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	unsigned int portid;
+	int ret;
+
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0)
+		return errno_log(errno, "mnl_socket_sendto");
+	portid = mnl_socket_get_portid(nl);
+	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	if (ret < 0)
+		return errno_log(errno, "mnl_socket_recvfrom");
+	if (mnl_cb_run(buf, ret, nlh->nlmsg_seq, portid, NULL, NULL) < 0)
+		return errno_set(errno);
+	return 0;
+}
+
+// Move a network interface into another network namespace, referenced by an
+// open fd (IFLA_NET_NS_FD), optionally renaming it first. Used to hand off a
+// host-mode VDUSE datapath netdev, born in the vdpa (initial) netns, to grout's
+// own netns as dp-<name>.
+//
+// This uses a dedicated NETLINK_ROUTE socket rather than the shared nl_sock:
+// the target interface lives in the netns the caller is currently attached to
+// (the vdpa netns, entered via setns), while nl_sock stays bound to grout's
+// home netns for its whole lifetime. A fresh socket binds to the current netns
+// and can therefore see the interface. The rename must happen here too, before
+// the move, for the same reason: once the netdev leaves for grout's netns,
+// nl_sock could rename it but its sysfs net/ entry is no longer resolvable from
+// the vdpa netns to find it again.
+//
+// When new_name is non-NULL the interface is brought administratively down and
+// renamed (the kernel only renames a down interface) before being moved.
+int netlink_link_move_netns(uint32_t ifindex, const char *new_name, int netns_fd) {
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	struct ifinfomsg *ifm;
+	struct mnl_socket *nl;
+	struct nlmsghdr *nlh;
+	int ret;
+
+	nl = mnl_socket_open(NETLINK_ROUTE);
+	if (nl == NULL)
+		return errno_log(errno, "mnl_socket_open(NETLINK_ROUTE)");
+	if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
+		ret = errno_log(errno, "mnl_socket_bind");
+		goto out;
+	}
+
+	if (new_name != NULL) {
+		// Bring the interface down (renaming requires it).
+		nlh = mnl_nlmsg_put_header(buf);
+		nlh->nlmsg_type = RTM_SETLINK;
+		nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+		nlh->nlmsg_seq = 1;
+		ifm = mnl_nlmsg_put_extra_header(nlh, sizeof(*ifm));
+		ifm->ifi_family = AF_UNSPEC;
+		ifm->ifi_index = ifindex;
+		ifm->ifi_change = IFF_UP;
+		ifm->ifi_flags = 0;
+		if ((ret = setlink_send(nl, nlh)) < 0)
+			goto out;
+
+		// Rename it.
+		nlh = mnl_nlmsg_put_header(buf);
+		nlh->nlmsg_type = RTM_SETLINK;
+		nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+		nlh->nlmsg_seq = 2;
+		ifm = mnl_nlmsg_put_extra_header(nlh, sizeof(*ifm));
+		ifm->ifi_family = AF_UNSPEC;
+		ifm->ifi_index = ifindex;
+		mnl_attr_put_strz(nlh, IFLA_IFNAME, new_name);
+		if ((ret = setlink_send(nl, nlh)) < 0)
+			goto out;
+	}
+
+	// Move it into the target netns.
+	nlh = mnl_nlmsg_put_header(buf);
+	nlh->nlmsg_type = RTM_SETLINK;
+	nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	nlh->nlmsg_seq = 3;
+	ifm = mnl_nlmsg_put_extra_header(nlh, sizeof(*ifm));
+	ifm->ifi_family = AF_UNSPEC;
+	ifm->ifi_index = ifindex;
+	mnl_attr_put_u32(nlh, IFLA_NET_NS_FD, netns_fd);
+	ret = setlink_send(nl, nlh);
+out:
+	mnl_socket_close(nl);
+	return ret;
+}
+
 int netlink_vdpa_dev_add(const char *name) {
 	return netlink_vdpa_dev_cmd(VDPA_CMD_DEV_NEW, name);
 }
