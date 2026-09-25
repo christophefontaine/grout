@@ -146,6 +146,36 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  self-hosted-tests:
+    if: ${{ github.actor != 'grout-bot' }}
+    name: self-hosted-tests (x86_64, gcc-14, DPDK 25.11, FRR 10.7)
+    runs-on: [self-hosted, x86_64]
+    env:
+      SANITIZE: none
+      BUILDTYPE: debugoptimized
+      CC: ccache gcc-14
+      FRR: '10.7'
+      DPDK: '25.11'
+      DPDK_CPU: generic
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # force fetch all history
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - run: git config --global --add safe.directory $PWD
+      - run: git fetch --force origin 'refs/tags/v*:refs/tags/v*'
+      - run: echo "CCACHE_DIR=$(ccache -k cache_dir)" >> $GITHUB_ENV
+      - run: ccache -z
+      - run: .github/workflows/check.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smoke-logs-self-hosted-x86_64
+          path: build/smoke/
+          retention-days: 10
+        if: always()
+      - run: ccache -sv
+
   lint:
     if: ${{ github.actor != 'grout-bot' }}
     runs-on: ubuntu-24.04
