@@ -34,6 +34,7 @@ frr_c_args = [
 frr_plugin = shared_module(
   'dplane_grout',
   files(
+    'acl_grout.c',
     'if_grout.c',
     'if_map.c',
     'l3vni_map.c',

@@ -8,6 +8,7 @@
 #include <gr_api_client_impl.h>
 // clang-format on
 
+#include "acl_grout.h"
 #include "if_grout.h"
 #include "if_map.h"
 #include "log_grout.h"
@@ -969,6 +970,18 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 	case DPLANE_OP_VTEP_DELETE:
 		return grout_vxlan_flood_update_ctx(ctx);
 
+	case DPLANE_OP_IPSET_ADD:
+	case DPLANE_OP_IPSET_DELETE:
+		return grout_add_del_ipset(ctx);
+
+	case DPLANE_OP_IPSET_ENTRY_ADD:
+	case DPLANE_OP_IPSET_ENTRY_DELETE:
+		return grout_add_del_ipset_entry(ctx);
+
+	case DPLANE_OP_IPTABLE_ADD:
+	case DPLANE_OP_IPTABLE_DELETE:
+		return grout_add_del_iptable(ctx);
+
 	case DPLANE_OP_SRV6_ENCAP_SRCADDR_SET:
 		return grout_set_sr_tunsrc(ctx);
 
@@ -1070,6 +1083,7 @@ static void grout_reconnect(struct event *) {
 	gr_api_client_disconnect(grout_ctx.sync_client);
 	grout_ctx.sync_client = NULL;
 	clear_ifindex_mappings();
+	clear_acl_mappings();
 
 	// Inject a barrier marker before destroying VRF_DEFAULT. FIFO drain
 	// guarantees all earlier ere's are attached when observed; vrf_terminate
