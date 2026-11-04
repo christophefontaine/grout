@@ -16,3 +16,8 @@ enum zebra_dplane_result grout_add_del_iptable(struct zebra_dplane_ctx *ctx);
 
 // Drop all ipset name -> grout set id mappings (called on grout reconnect).
 void clear_acl_mappings(void);
+
+// Re-push zebra's PBR netfilter objects into grout after a reconnect.
+// Must be called from the zebra main thread once the interfaces have been
+// re-synced (the iptable interface name resolution relies on them).
+void grout_resync_acls(void);

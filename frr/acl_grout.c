@@ -18,7 +18,9 @@
 #include <lib/vrf.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zebra/zebra_dplane.h>
 #include <zebra/zebra_pbr.h>
+#include <zebra/zebra_router.h>
 
 // ---------------------------------------------------------------------------
 // ipset name -> grout set id map
@@ -355,4 +357,60 @@ enum zebra_dplane_result grout_add_del_iptable(struct zebra_dplane_ctx *ctx) {
 
 	free(req);
 	return ZEBRA_DPLANE_REQUEST_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// ACL resync
+//
+// Zebra owns the ACL state installed by BGP flowspec: on grout reconnect the
+// plugin wipes its mappings and grout comes back empty, but nothing replays
+// the objects (bgpd does not re-announce them on zebra events). Re-enqueue
+// the dplane operations for the objects held by zebra so that they flow
+// through the regular provider chain, i.e. through the translation above.
+// The resulting notifications confirm the re-installation to bgpd.
+//
+// The operations are processed asynchronously by the dplane thread, which
+// owns the grout API client used by the translations. This is safe as long
+// as no other thread uses that client concurrently: the main thread sync
+// steps all use the dedicated sync client.
+
+static void grout_resync_ipset_cb(struct hash_bucket *bucket, void *) {
+	struct zebra_pbr_ipset *ipset = bucket->data;
+
+	(void)dplane_pbr_ipset_add(ipset);
+}
+
+static void grout_resync_ipset_entry_cb(struct hash_bucket *bucket, void *) {
+	struct zebra_pbr_ipset_entry *entry = bucket->data;
+
+	(void)dplane_pbr_ipset_entry_add(entry);
+}
+
+static void grout_resync_iptable_cb(struct hash_bucket *bucket, void *) {
+	struct zebra_pbr_iptable *iptable = bucket->data;
+
+	(void)dplane_pbr_iptable_add(iptable);
+}
+
+void grout_resync_acls(void) {
+	unsigned int n_entries = hashcount(zrouter.ipset_entry_hash);
+	unsigned int n_iptables = hashcount(zrouter.iptable_hash);
+	unsigned int n_ipsets = hashcount(zrouter.ipset_hash);
+
+	if (n_ipsets == 0 && n_entries == 0 && n_iptables == 0)
+		return;
+
+	gr_log_info(
+		"resyncing %u ipsets, %u ipset entries and %u iptables into grout",
+		n_ipsets,
+		n_entries,
+		n_iptables
+	);
+
+	// Enqueue in dependency order: ipsets first (their dplane results
+	// rebuild the name -> set id map), then entries, then iptables. The
+	// dplane processes updates in FIFO order.
+	hash_iterate(zrouter.ipset_hash, grout_resync_ipset_cb, NULL);
+	hash_iterate(zrouter.ipset_entry_hash, grout_resync_ipset_entry_cb, NULL);
+	hash_iterate(zrouter.iptable_hash, grout_resync_iptable_cb, NULL);
 }

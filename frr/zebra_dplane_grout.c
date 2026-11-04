@@ -89,6 +89,7 @@ static void zebra_read_notifications(struct event *event);
 static void dplane_grout_connect(struct event *);
 static void zebra_grout_connect(struct event *);
 static void grout_sync(struct event *);
+static void grout_sync_acls(struct event *);
 static void grout_sync_ifaces(struct event *);
 static void grout_sync_addrs(struct event *);
 static void grout_reconnect(struct event *);
@@ -176,10 +177,9 @@ static void grout_sync_fdb(struct event *) {
 	gr_log_debug("sync FDB entries");
 
 	// Use the sync client: the grout API client is not thread safe and
-	// grout_ctx.client is owned by the dplane thread, which uses it for
-	// every dplane operation translation. Sharing it here would race
-	// with translations of zapi driven updates (e.g. staticd re-pushing
-	// routes right after the interfaces come back).
+	// grout_ctx.client is owned by the dplane thread (used by every
+	// dplane operation translation, including the ACL resync which runs
+	// concurrently with this step).
 	gr_api_client_stream_foreach (
 		fdb, ret, grout_ctx.sync_client, GR_FDB_LIST, sizeof(req), &req
 	) {
@@ -667,11 +667,21 @@ static void grout_sync_ifaces(struct event *) {
 		}
 	}
 
-	event_add_event(zrouter.master, grout_sync_fdb, NULL, 0, &grout_ctx.dg_t_zebra_sync);
+	event_add_event(zrouter.master, grout_sync_acls, NULL, 0, &grout_ctx.dg_t_zebra_sync);
 	return;
 
 err:
 	event_add_timer(zrouter.master, grout_reconnect, NULL, 1, &grout_ctx.dg_t_zebra_sync);
+}
+
+// Re-push zebra's ACL state (BGP flowspec netfilter objects) into the
+// reconnected grout. Runs on the zebra main thread once the interfaces have
+// been re-synced: the iptable interface name resolution relies on zebra's
+// interface table and on the ifindex mappings.
+static void grout_sync_acls(struct event *) {
+	grout_resync_acls();
+
+	event_add_event(zrouter.master, grout_sync_fdb, NULL, 0, &grout_ctx.dg_t_zebra_sync);
 }
 
 static void dplane_grout_connect(struct event *) {
