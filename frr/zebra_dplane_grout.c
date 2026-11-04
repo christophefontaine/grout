@@ -175,7 +175,14 @@ static void grout_sync_fdb(struct event *) {
 
 	gr_log_debug("sync FDB entries");
 
-	gr_api_client_stream_foreach (fdb, ret, grout_ctx.client, GR_FDB_LIST, sizeof(req), &req) {
+	// Use the sync client: the grout API client is not thread safe and
+	// grout_ctx.client is owned by the dplane thread, which uses it for
+	// every dplane operation translation. Sharing it here would race
+	// with translations of zapi driven updates (e.g. staticd re-pushing
+	// routes right after the interfaces come back).
+	gr_api_client_stream_foreach (
+		fdb, ret, grout_ctx.sync_client, GR_FDB_LIST, sizeof(req), &req
+	) {
 		gr_log_debug(
 			"sync fdb bridge %u iface %u mac %pEA",
 			fdb->bridge_id,
