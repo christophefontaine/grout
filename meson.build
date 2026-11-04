@@ -232,6 +232,12 @@ executable(
   install: false,
 )
 
+executable(
+  'zapi_acl_inject', files('smoke/zapi_acl_inject.c'),
+  include_directories: api_inc,
+  install: false,
+)
+
 # docs/ must come after grcli_exe since man pages are generated using grcli --man
 subdir('docs')
 
