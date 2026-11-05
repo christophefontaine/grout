@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2024 Robin Jarry
 
+#include "acl.h"
 #include "conntrack.h"
 #include "eth.h"
 #include "graph.h"
@@ -28,6 +29,7 @@ enum edges {
 	BAD_LENGTH,
 	BAD_VERSION,
 	OTHER_HOST,
+	DROP,
 	EDGE_COUNT,
 };
 
@@ -116,6 +118,14 @@ ip_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, ui
 		//     length field.
 		if (rte_cpu_to_be_16(ip->total_length) < sizeof(struct rte_ipv4_hdr)) {
 			edge = BAD_LENGTH;
+			goto next;
+		}
+
+		// Ingress ACL: one predicted load when no rule applies to the
+		// interface, a full rte_acl classification otherwise.
+		if (unlikely(iface->acl_ip4 != NULL)
+		    && gr_acl_input_drop4(iface->acl_ip4, mbuf, ip)) {
+			edge = DROP;
 			goto next;
 		}
 
@@ -220,6 +230,7 @@ static struct rte_node_register input_node = {
 		[BAD_LENGTH] = "ip_input_bad_length",
 		[BAD_VERSION] = "ip_input_bad_version",
 		[OTHER_HOST] = "ip_input_other_host",
+		[DROP] = "ip_input_acl",
 	},
 };
 
@@ -237,6 +248,7 @@ GR_DROP_REGISTER(ip_input_bad_address);
 GR_DROP_REGISTER(ip_input_bad_length);
 GR_DROP_REGISTER(ip_input_bad_version);
 GR_DROP_REGISTER(ip_input_other_host);
+GR_DROP_REGISTER(ip_input_acl);
 GR_DROP_REGISTER(ip_blackhole);
 
 #ifdef __GROUT_UNIT_TEST__
@@ -253,6 +265,10 @@ mock_func(int, drop_format(char *, size_t, const void *, size_t));
 mock_func(int, trace_ip_format(char *, size_t, const struct rte_ipv4_hdr *, size_t));
 mock_func(void, gr_eth_input_add_type(rte_be16_t, const char *));
 mock_func(void, loopback_input_add_type(rte_be16_t, const char *));
+mock_func(
+	bool,
+	gr_acl_input_drop4(const struct acl_class *, const struct rte_mbuf *, const struct rte_ipv4_hdr *)
+);
 mock_func(
 	bool,
 	gr_conn_parse_key(

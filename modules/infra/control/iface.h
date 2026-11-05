@@ -17,6 +17,8 @@ struct iface_mac {
 	struct rte_ether_addr mac;
 };
 
+struct acl_class; // defined in modules/acl/acl.h
+
 struct __rte_cache_aligned iface {
 	BASE(__gr_iface_base);
 
@@ -30,6 +32,11 @@ struct __rte_cache_aligned iface {
 	unsigned promisc;
 	bool user_promisc;
 	vec struct iface_mac *macs;
+	// ACL classification contexts, RCU protected, written by the control
+	// plane and read by ip_input/ip6_input. Index 0 is IPv4, 1 is IPv6.
+	// NULL when no rule applies to this interface.
+	struct acl_class *acl_ip4;
+	struct acl_class *acl_ip6;
 	alignas(alignof(void *)) uint8_t info[/* size depends on type */];
 };
 

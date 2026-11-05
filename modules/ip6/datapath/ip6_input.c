@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2024 Robin Jarry
 
+#include "acl.h"
 #include "eth.h"
 #include "graph.h"
 #include "ip6.h"
@@ -26,6 +27,7 @@ enum edges {
 	BAD_VERSION,
 	BAD_ADDR,
 	BAD_LENGTH,
+	DROP,
 	EDGE_COUNT,
 };
 
@@ -80,6 +82,15 @@ ip6_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 			goto next;
 		}
 
+		// Ingress ACL: one predicted load when no rule applies to the
+		// interface, a full rte_acl classification otherwise. Runs
+		// before the multicast handling, like ip_input.
+		if (unlikely(iface->acl_ip6 != NULL)
+		    && gr_acl_input_drop6(iface->acl_ip6, mbuf, ip)) {
+			edge = DROP;
+			goto next;
+		}
+
 		if (unlikely(rte_ipv6_addr_is_mcast(&ip->dst_addr))) {
 			switch (rte_ipv6_mc_scope(&ip->dst_addr)) {
 			case RTE_IPV6_MC_SCOPE_NONE:
@@ -99,6 +110,14 @@ ip6_input_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 				else
 					edge = LOCAL;
 			}
+			goto next;
+		}
+
+		// Ingress ACL: one predicted load when no rule applies to the
+		// interface, a full rte_acl classification otherwise.
+		if (unlikely(iface->acl_ip6 != NULL)
+		    && gr_acl_input_drop6(iface->acl_ip6, mbuf, ip)) {
+			edge = DROP;
 			goto next;
 		}
 
@@ -180,6 +199,7 @@ static struct rte_node_register input_node = {
 		[BAD_VERSION] = "ip6_input_bad_version",
 		[BAD_ADDR] = "ip6_input_bad_addr",
 		[BAD_LENGTH] = "ip6_input_bad_length",
+		[DROP] = "ip6_input_acl",
 	},
 };
 
@@ -197,6 +217,7 @@ GR_DROP_REGISTER(ip6_input_other_host);
 GR_DROP_REGISTER(ip6_input_bad_version);
 GR_DROP_REGISTER(ip6_input_bad_addr);
 GR_DROP_REGISTER(ip6_input_bad_length);
+GR_DROP_REGISTER(ip6_input_acl);
 GR_DROP_REGISTER(ip6_blackhole);
 
 #ifdef __GROUT_UNIT_TEST__
@@ -218,12 +239,18 @@ mock_func(int, trace_ip6_format(char *, size_t, const struct rte_ipv6_hdr *, siz
 mock_func(void, gr_eth_input_add_type(rte_be16_t, const char *));
 mock_func(void, loopback_input_add_type(rte_be16_t, const char *));
 mock_func(struct nexthop *, mcast6_get_member(uint16_t, const struct rte_ipv6_addr *));
+mock_func(
+	bool,
+	gr_acl_input_drop6(const struct acl_class *, const struct rte_mbuf *, const struct rte_ipv6_hdr *)
+);
 
 struct fake_mbuf {
 	struct rte_ipv6_hdr ipv6_hdr;
 	struct rte_mbuf mbuf;
 	uint8_t priv_data[GR_MBUF_PRIV_MAX_SIZE];
 };
+
+static struct iface iface;
 
 static void ipv6_init_default_mbuf(struct fake_mbuf *fake_mbuf) {
 	memset(fake_mbuf, 0, sizeof(struct fake_mbuf));
@@ -242,6 +269,8 @@ static void ipv6_init_default_mbuf(struct fake_mbuf *fake_mbuf) {
 	fake_mbuf->mbuf.ol_flags = 0;
 	fake_mbuf->mbuf.packet_type = RTE_PTYPE_L3_IPV6;
 
+	// zeroed iface: acl_ip6 is NULL, the ingress ACL hook is skipped
+	eth_input_mbuf_data(&fake_mbuf->mbuf)->iface = &iface;
 	eth_input_mbuf_data(&fake_mbuf->mbuf)->domain = ETH_DOMAIN_OTHER;
 	eth_input_mbuf_data(&fake_mbuf->mbuf)->nh = NULL;
 }

@@ -101,7 +101,6 @@ struct acl_frag_spec {
 	uint16_t off_hi;
 };
 
-#define ACL_FRAG_OFF_MAX 0x1fff
 #define ACL_MAX_SPECS 8
 
 // Filter scalar criteria that rte_acl cannot express directly (no
@@ -125,34 +124,40 @@ struct acl_group {
 };
 
 static const struct rte_acl_field_def acl_defs4[ACL4_F_COUNT] = {
-	[ACL4_F_PROTO] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL4_F_PROTO, 0, 0},
-	[ACL4_F_DSCP] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL4_F_DSCP, 0, 1},
-	[ACL4_F_FRAG_FLAGS] = {RTE_ACL_FIELD_TYPE_BITMASK, 1, ACL4_F_FRAG_FLAGS, 0, 2},
-	[ACL4_F_FRAG_OFFSET] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_FRAG_OFFSET, 1, 4},
-	[ACL4_F_SRC] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL4_F_SRC, 2, 8},
-	[ACL4_F_DST] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL4_F_DST, 3, 12},
-	[ACL4_F_L4_A] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_L4_A, 4, 16},
-	[ACL4_F_L4_B] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_L4_B, 4, 18},
-	[ACL4_F_TCP_FLAGS] = {RTE_ACL_FIELD_TYPE_BITMASK, 1, ACL4_F_TCP_FLAGS, 5, 20},
-	[ACL4_F_PKT_LEN] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_PKT_LEN, 5, 22},
+	[ACL4_F_PROTO] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL4_F_PROTO, 0, ACL4_OFF_PROTO},
+	[ACL4_F_DSCP] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL4_F_DSCP, 1, ACL4_OFF_DSCP},
+	[ACL4_F_FRAG_FLAGS] =
+		{RTE_ACL_FIELD_TYPE_BITMASK, 1, ACL4_F_FRAG_FLAGS, 1, ACL4_OFF_FRAG_FLAGS},
+	[ACL4_F_FRAG_OFFSET] =
+		{RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_FRAG_OFFSET, 1, ACL4_OFF_FRAG_OFFSET},
+	[ACL4_F_SRC] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL4_F_SRC, 2, ACL4_OFF_SRC},
+	[ACL4_F_DST] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL4_F_DST, 3, ACL4_OFF_DST},
+	[ACL4_F_L4_A] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_L4_A, 4, ACL4_OFF_SPORT},
+	[ACL4_F_L4_B] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_L4_B, 4, ACL4_OFF_DPORT},
+	[ACL4_F_TCP_FLAGS] =
+		{RTE_ACL_FIELD_TYPE_BITMASK, 1, ACL4_F_TCP_FLAGS, 5, ACL4_OFF_TCP_FLAGS},
+	[ACL4_F_PKT_LEN] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL4_F_PKT_LEN, 5, ACL4_OFF_PKT_LEN},
+	[ACL4_F_PAD] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL4_F_PAD, 5, ACL4_OFF_PAD},
 };
 
 static const struct rte_acl_field_def acl_defs6[ACL6_F_COUNT] = {
-	[ACL6_F_PROTO] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL6_F_PROTO, 0, 0},
-	[ACL6_F_DSCP] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL6_F_DSCP, 0, 1},
-	[ACL6_F_FLOW_LABEL] = {RTE_ACL_FIELD_TYPE_RANGE, 4, ACL6_F_FLOW_LABEL, 1, 4},
-	[ACL6_F_SRC + 0] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 0, 2, 8},
-	[ACL6_F_SRC + 1] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 1, 3, 12},
-	[ACL6_F_SRC + 2] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 2, 4, 16},
-	[ACL6_F_SRC + 3] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 3, 5, 20},
-	[ACL6_F_DST + 0] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 0, 6, 24},
-	[ACL6_F_DST + 1] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 1, 7, 28},
-	[ACL6_F_DST + 2] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 2, 8, 32},
-	[ACL6_F_DST + 3] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 3, 9, 36},
-	[ACL6_F_L4_A] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL6_F_L4_A, 10, 40},
-	[ACL6_F_L4_B] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL6_F_L4_B, 10, 42},
-	[ACL6_F_TCP_FLAGS] = {RTE_ACL_FIELD_TYPE_BITMASK, 1, ACL6_F_TCP_FLAGS, 11, 44},
-	[ACL6_F_PKT_LEN] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL6_F_PKT_LEN, 11, 46},
+	[ACL6_F_PROTO] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL6_F_PROTO, 0, ACL6_OFF_PROTO},
+	[ACL6_F_DSCP] = {RTE_ACL_FIELD_TYPE_RANGE, 1, ACL6_F_DSCP, 1, ACL6_OFF_DSCP},
+	[ACL6_F_TCP_FLAGS] =
+		{RTE_ACL_FIELD_TYPE_BITMASK, 1, ACL6_F_TCP_FLAGS, 1, ACL6_OFF_TCP_FLAGS},
+	[ACL6_F_PKT_LEN] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL6_F_PKT_LEN, 1, ACL6_OFF_PKT_LEN},
+	[ACL6_F_FLOW_LABEL] =
+		{RTE_ACL_FIELD_TYPE_RANGE, 4, ACL6_F_FLOW_LABEL, 2, ACL6_OFF_FLOW_LABEL},
+	[ACL6_F_SRC + 0] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 0, 3, ACL6_OFF_SRC + 0},
+	[ACL6_F_SRC + 1] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 1, 4, ACL6_OFF_SRC + 4},
+	[ACL6_F_SRC + 2] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 2, 5, ACL6_OFF_SRC + 8},
+	[ACL6_F_SRC + 3] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_SRC + 3, 6, ACL6_OFF_SRC + 12},
+	[ACL6_F_DST + 0] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 0, 7, ACL6_OFF_DST + 0},
+	[ACL6_F_DST + 1] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 1, 8, ACL6_OFF_DST + 4},
+	[ACL6_F_DST + 2] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 2, 9, ACL6_OFF_DST + 8},
+	[ACL6_F_DST + 3] = {RTE_ACL_FIELD_TYPE_MASK, 4, ACL6_F_DST + 3, 10, ACL6_OFF_DST + 12},
+	[ACL6_F_L4_A] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL6_F_L4_A, 11, ACL6_OFF_SPORT},
+	[ACL6_F_L4_B] = {RTE_ACL_FIELD_TYPE_RANGE, 2, ACL6_F_L4_B, 11, ACL6_OFF_DPORT},
 };
 
 // Expand the FRR fragment criteria into rule fragments. Returns the
@@ -162,7 +167,10 @@ static int acl_frag_specs(uint8_t fragment, bool inverse, struct acl_frag_spec *
 	uint32_t n_specs = 0;
 
 	if (fragment == 0) {
-		specs[0] = (struct acl_frag_spec) {.off_lo = 0, .off_hi = ACL_FRAG_OFF_MAX};
+		// Fully wild, like the other unconstrained fields: rte_acl
+		// can then drop the whole input group when dscp and frag_flags
+		// are wild too (see the key layout comment in acl.h).
+		specs[0] = (struct acl_frag_spec) {.off_lo = 0, .off_hi = UINT16_MAX};
 		return 1;
 	}
 
@@ -174,7 +182,7 @@ static int acl_frag_specs(uint8_t fragment, bool inverse, struct acl_frag_spec *
 			continue;
 
 		s = &specs[n_specs];
-		*s = (struct acl_frag_spec) {.off_lo = 0, .off_hi = ACL_FRAG_OFF_MAX};
+		*s = (struct acl_frag_spec) {.off_lo = 0, .off_hi = UINT16_MAX};
 
 		switch (frag) {
 		case GR_ACL_FRAGMENT_DONT:
@@ -622,6 +630,10 @@ static int acl_group_emit(
 				r->field[ACL4_F_FRAG_FLAGS].mask_range.u8 = v->frag.mask;
 				r->field[ACL4_F_FRAG_OFFSET].value.u16 = v->frag.off_lo;
 				r->field[ACL4_F_FRAG_OFFSET].mask_range.u16 = v->frag.off_hi;
+				// The pad field is always wild: it only exists to
+				// keep input group 5 four bytes long (see acl.h).
+				r->field[ACL4_F_PAD].value.u8 = 0;
+				r->field[ACL4_F_PAD].mask_range.u8 = UINT8_MAX;
 			}
 			if (f->tcp_mask != 0)
 				g->l4 = true;
@@ -823,14 +835,18 @@ static void acl_recompile(void) {
 
 	// Publish: patch the per interface pointers, wait for the dataplane
 	// to be done with the previous generation and free it.
-	for (int af = 0; af < 2; af++) {
+	{
 		struct iface *iface = NULL;
 
 		while ((iface = iface_next(GR_IFACE_TYPE_UNDEF, iface)) != NULL) {
-			if (class_map[af] != NULL)
-				iface->acl[af] = class_map[af][iface->id];
+			if (class_map[0] != NULL)
+				iface->acl_ip4 = class_map[0][iface->id];
 			else
-				iface->acl[af] = NULL;
+				iface->acl_ip4 = NULL;
+			if (class_map[1] != NULL)
+				iface->acl_ip6 = class_map[1][iface->id];
+			else
+				iface->acl_ip6 = NULL;
 		}
 	}
 	rte_rcu_qsbr_synchronize(gr_datapath_rcu(), RTE_QSBR_THRID_INVALID);

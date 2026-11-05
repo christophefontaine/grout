@@ -82,6 +82,7 @@ dpdk_drivers = [
   'net/vmxnet3',
 ]
 dpdk_libs = [
+  'acl',
   'cryptodev',
   'dmadev',
   'fib',
