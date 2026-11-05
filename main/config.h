@@ -39,6 +39,9 @@ struct gr_config {
 	uint32_t max_routes;
 	uint32_t max_fdb_entries;
 	uint32_t max_conntracks;
+	uint32_t max_acl_sets;
+	uint32_t max_acl_entries;
+	uint32_t max_acl_filters;
 	uint32_t port_queue_size;
 	uint32_t cp_mempool_size;
 	uint32_t max_held_packets;

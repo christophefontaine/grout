@@ -144,6 +144,7 @@ struct gr_acl_filter {
 	uint8_t proto; // IP protocol to match.
 	uint16_t flow_label; // IPv6 flow label.
 	addr_family_t af;
+	uint64_t pkts; // Read only: number of packets matched.
 	uint16_t n_ifaces; // Number of interfaces the filter applies on.
 	uint16_t iface_ids[]; // Interface ids, n_ifaces of them.
 };

@@ -2,4 +2,8 @@
 # Copyright (c) 2026 Christophe Fontaine, Red Hat
 
 subdir('api')
+subdir('cli')
 subdir('control')
+subdir('datapath')
+
+inc += include_directories('.')
