@@ -31,6 +31,14 @@ frr_c_args = [
   '-Wno-constant-logical-operand',
 ]
 
+if get_option('frr_version') == 'srv6-l2evpn'
+  # This FRR version is the SRv6 L2 EVPN fork (FRRouting PR #22570), which
+  # adds the DPLANE_OP_SR6_UPDATE_SID / BRPORT_FLAGS / BRIDGE_VLAN_ADD
+  # dataplane operations. The plugin code using them is gated on this
+  # define since the operations do not exist in upstream FRR.
+  frr_c_args += '-DHAVE_FRR_SRV6_L2EVPN'
+endif
+
 frr_plugin = shared_module(
   'dplane_grout',
   files(
@@ -38,6 +46,7 @@ frr_plugin = shared_module(
     'if_map.c',
     'l3vni_map.c',
     'rt_grout.c',
+    'sr6_grout.c',
     'zebra_dplane_grout.c',
   ) + grout_header,
   name_prefix: '',

@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/SathishAviz/SRv6-L2-EVPN
+revision = srv6-l2-evpn-support
+depth = 1
+directory = frr-frr-srv6-l2evpn
+patch_directory = frr
+
+[provide]
+dependency_names = frr-srv6-l2evpn
