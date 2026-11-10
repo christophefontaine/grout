@@ -5,6 +5,7 @@
 #include "if_map.h"
 #include "l3vni_map.h"
 #include "log_grout.h"
+#include "sr6_grout.h"
 #include "zebra_dplane_grout.h"
 
 #include <gr_ip4.h>
@@ -274,6 +275,10 @@ void grout_link_change(struct gr_iface *gr_if, bool new, bool startup) {
 		dplane_ctx_set_status(ctx, ZEBRA_DPLANE_REQUEST_QUEUED);
 		if (gr_vxlan != NULL)
 			l3vni_del_iface(gr_if->id);
+#ifdef HAVE_FRR_SRV6_L2EVPN
+		// Drop the SRv6 L2 encap state tracking this interface.
+		grout_sr6_port_del(gr_if->id);
+#endif
 		remove_mapping_by_grout_ifindex(gr_if->id);
 	}
 

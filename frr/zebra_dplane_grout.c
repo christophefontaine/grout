@@ -12,6 +12,7 @@
 #include "if_map.h"
 #include "log_grout.h"
 #include "rt_grout.h"
+#include "sr6_grout.h"
 
 #include <fcntl.h>
 #include <lib/bitfield.h>
@@ -971,6 +972,17 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 
 	case DPLANE_OP_SRV6_ENCAP_SRCADDR_SET:
 		return grout_set_sr_tunsrc(ctx);
+
+#ifdef HAVE_FRR_SRV6_L2EVPN
+	case DPLANE_OP_BRPORT_FLAGS:
+		return grout_sr6_brport_flags_ctx(ctx);
+
+	case DPLANE_OP_BRIDGE_VLAN_ADD:
+		return grout_sr6_bridge_vlan_add_ctx(ctx);
+
+	case DPLANE_OP_SR6_UPDATE_SID:
+		return grout_sr6_update_sid_ctx(ctx);
+#endif
 
 #if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 7, 0)
 	case DPLANE_OP_FDB_READ:
