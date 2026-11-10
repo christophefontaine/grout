@@ -34,6 +34,10 @@ The following zebra dataplane operations are handled:
 - Neighbor install, update and delete (used for EVPN RMAC caching)
 - SRv6 encap source address
 
+When built against the SRv6 L2 EVPN fork (see below), the plugin also handles
+the three dataplane operations that fork adds for SRv6 L2 services: bridge-port
+flags, bridge VLAN membership and SRv6 tunnel SID programming.
+
 ## EVPN support
 
 The plugin supports EVPN with VXLAN overlays, including L2 VNI (type-2 MAC/IP
@@ -54,6 +58,56 @@ overridden manually with *grcli interface set vxlan NAME learning on*, but the
 plugin disables it again whenever it re-synchronizes the interface. Learning is
 not involved for L3 VNI (VRF mode) interfaces, where reachability is driven
 entirely by routes.
+
+## SRv6 L2 EVPN support
+
+The plugin supports the SRv6 L2 EVPN (RFC 9252) control plane of the FRR fork
+carrying FRRouting PR #22570 (_SathishAviz/SRv6-L2-EVPN_, branch
+_srv6-l2-evpn-support_). That fork adds EVPN E-LAN (Type-2/Type-3) and EVPN
+VPWS (Type-1) over an SRv6 dataplane, decoupled from VXLAN.
+
+Since the operations and ZAPI messages involved do not exist in upstream FRR
+releases, this support is opt-in at build time: configure grout with
+*-Dfrr_version=srv6-l2evpn*, which builds the plugin against the fork and
+defines *HAVE_FRR_SRV6_L2EVPN* for the plugin sources. Code using the new
+interfaces is gated on this define, so the plugin keeps building against
+vanilla FRR (10.5, 10.6, 10.7 and master) without the fork.
+
+The fork follows an operator-owned interface model: FRR never creates the
+_SRv6 L2_ tunnel ports. The operator pre-creates them, enslaves them to the
+EVPN bridge, and zebra discovers them by name: _sr6-\<n\>_ (unicast, End.DT2U
+role), _bum-sr6-\<n\>_ (BUM, End.DT2M role) and _vpws-sr6-\<name\>_ (EVPN VPWS,
+End.DX2 role). Zebra then reprograms them in place through three new dataplane
+operations, which the plugin translates to grout:
+
+- *DPLANE_OP_BRPORT_FLAGS* pushes an EVPN bridge-port profile onto a tunnel
+  port: never learn (decapsulated frames carry remote MACs), flood only in the
+  BUM role, always isolated (split horizon).
+- *DPLANE_OP_BRIDGE_VLAN_ADD* binds the EVI VLAN onto a tunnel port.
+- *DPLANE_OP_SR6_UPDATE_SID* sets the encapsulation segment list of a tunnel
+  port (the remote PE SID; the all-zero SID resets the port).
+
+The seg6local local SID routes deserve a special mention. Upstream zebra
+installs a route's nexthop group with a separate
+*DPLANE_OP_NH_INSTALL* operation before the route itself. The fork changes
+this for SRv6 local SIDs: the Linux kernel rejects _LWTUNNEL_ENCAP_SEG6_LOCAL_
+attributes inside nexthop-group objects (RTM_NEWNEXTHOP answers EINVAL), so
+zebra_nhg_install_kernel() short-circuits NHEs whose nexthop carries a
+seg6local action. It marks them *NEXTHOP_GROUP_INSTALLED* without enqueueing
+anything to the dataplane, and the route encoder falls back to inline
+(per-route) nexthop encoding instead of RTA_NH_ID.
+
+For a dataplane plugin this means a seg6local route arrives with an
+*NEXTHOP_GROUP_INSTALLED* nexthop the plugin has never seen: the route install
+references a nexthop that does not exist in the forwarding plane yet, and
+every SRv6 local SID (End, End.X, End.DT4/DT6/DT46 and the new End.DX2/DT2U/
+DT2M) would fail to install with ENOENT.
+
+The plugin therefore detects inline seg6local nexthops in the route install
+path (the nexthop group carried by the route dataplane context) and programs
+the nexthop on the fly, right before the route that references it. The
+nexthop delete path is unchanged: the fork still enqueues
+*DPLANE_OP_NH_DELETE* for those NHEs since they are marked installed.
 
 # CONTROL PLANE REPRESENTORS
 
@@ -163,6 +217,15 @@ This is not needed for protocols that use multicast or link-local addresses
 Source-address-based routing (_from_ prefix) is not supported by grout.
 The plugin logs an error and skips such routes.
 
+## SRv6 L2 EVPN datapath
+
+The SRv6 L2 EVPN control plane integration requires the fork (see above); it
+cannot be built against upstream FRR. The L2 service dataplane itself (the
+End.DX2/End.DT2U/End.DT2M decap behaviors and the L2 _H.Encaps_ encapsulation
+on bridge ports) is implemented in the grout SRv6 module; see the
+*SRv6 L2 EVPN support* section above and *grcli-srv6*(1) for the interface
+model.
+
 ## Graceful restart
 
 The plugin supports FRR graceful restart (*-K* sweep timer). After a zebra
@@ -171,7 +234,11 @@ cleaned up normally once the timer expires.
 
 When grout itself restarts, the plugin detects the disconnection, tears down
 all synchronized state, and performs a fresh full synchronization once grout
-is available again.
+is available again. During that window the SRv6 L2 EVPN dataplane operations
+targeting not yet re-mapped interfaces either fail with a transient error or
+succeed without programming; in both cases the programming (the port profile,
+the remote SID and the EVI VLAN) is re-issued when the interface is re-added
+on reconnect or on the next EVPN realize, so the synchronization converges.
 
 # SEE ALSO
 
