@@ -68,6 +68,11 @@ static uint16_t bridge_input_process(
 				learn = iface_info_vxlan(d->iface)->flags & GR_VXLAN_F_LEARN;
 				vtep = d->vtep;
 			}
+			if (d->iface->type == GR_IFACE_TYPE_SR6) {
+				// Decapsulated frames carry remote MACs: never
+				// learn them on an SRv6 L2 service port.
+				learn = false;
+			}
 			if (learn)
 				fdb_learn(
 					bridge->id, d->iface->id, &eth->src_addr, d->vlan_id, &vtep

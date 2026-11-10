@@ -7,6 +7,7 @@
 #include "mbuf.h"
 
 #include <gr_infra.h>
+#include <gr_srv6.h>
 
 enum edges {
 	OUTPUT = 0,
@@ -64,6 +65,14 @@ static uint16_t bridge_flood_process(
 
 		bridge = iface_info_bridge(br);
 
+		if (!(bridge->flags & GR_BRIDGE_F_FLOOD)) {
+			// Enforce the bridge flood policy for every caller: the
+			// frames injected directly by the End.DT2M decapsulation
+			// and the neighbor suppression fallback do not go through
+			// bridge_input's own check.
+			goto next;
+		}
+
 		for (uint16_t j = 0; j < bridge->n_members; j++) {
 			member = bridge->members[j];
 
@@ -72,6 +81,21 @@ static uint16_t bridge_flood_process(
 
 			if (!(member->flags & GR_IFACE_F_UP))
 				continue; // Skip down interfaces
+
+			if (member->type == GR_IFACE_TYPE_SR6) {
+				// Unicast-role SRv6 port: only known unicast
+				// from FDB entries, no BUM.
+				if (!(gr_sr6_iface_flags(member->info) & GR_SR6_F_FLOOD))
+					continue;
+				// EVPN split horizon (the kernel "isolated"
+				// bridge-port flag): a frame injected through
+				// an SRv6 port (decapped at a local
+				// End.DX2/DT2U/DT2M SID) never goes back out
+				// of another SRv6 port, preventing PE-to-PE
+				// loops.
+				if (iface->type == GR_IFACE_TYPE_SR6)
+					continue;
+			}
 
 			copy = copy_packet(m, flood_count, member);
 			if (copy == NULL)
