@@ -507,6 +507,9 @@ void grout_route6_change(bool new, struct gr_ip6_route *gr_r6, bool startup) {
 	);
 }
 
+static enum zebra_dplane_result
+grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *nh);
+
 enum zebra_dplane_result grout_add_del_route(struct zebra_dplane_ctx *ctx) {
 	union {
 		struct gr_ip4_route_add_req r4_add;
@@ -562,6 +565,45 @@ enum zebra_dplane_result grout_add_del_route(struct zebra_dplane_ctx *ctx) {
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 	// TODO: other check for metric, distance, and so-on
+
+#ifdef HAVE_FRR_SRV6_L2EVPN
+	/*
+	 * The srv6-l2evpn fork does not enqueue DPLANE_OP_NH_INSTALL for NHEs
+	 * whose nexthop carries a seg6local action: the kernel rejects
+	 * LWTUNNEL_ENCAP_SEG6_LOCAL inside nexthop-group objects, so zebra
+	 * marks the NHE installed without going through the dplane and
+	 * encodes the route nexthop inline instead. The plugin would
+	 * otherwise never see the nexthop before the route referencing it:
+	 * install it here, on the fly.
+	 */
+	if (new) {
+		const struct nexthop_group *nhg = dplane_ctx_get_ng(ctx);
+		enum zebra_dplane_result ret;
+		struct nexthop *nh;
+		unsigned int count = 0;
+		bool seg6local = false;
+
+		if (nhg != NULL) {
+			for (ALL_NEXTHOPS_PTR(nhg, nh)) {
+				count++;
+				if (nh->nh_srv6 != NULL
+				    && nh->nh_srv6->seg6local_action
+					    != ZEBRA_SEG6_LOCAL_ACTION_UNSPEC)
+					seg6local = true;
+			}
+
+			if (seg6local) {
+				if (count != 1) {
+					gr_log_err("seg6local NHE with %u nexthops, unsupported", count);
+					return ZEBRA_DPLANE_REQUEST_FAILURE;
+				}
+				ret = grout_add_nexthop(nh_id, origin, nhg->nexthop);
+				if (ret != ZEBRA_DPLANE_REQUEST_SUCCESS)
+					return ret;
+			}
+		}
+	}
+#endif
 
 	if (p->family == AF_INET) {
 		struct ip4_net *dest;
