@@ -242,9 +242,13 @@ cannot be built against upstream FRR. The L2 service dataplane is implemented
 in the grout SRv6 module: the _sr6_ interface type (see the _SRv6 L2 EVPN
 support_ section above), the End.DX2/End.DT2U/End.DT2M local SID behaviors
 and the L2 encapsulation on the SRv6 bridge ports. It is covered by the
-_srv6_l2vpn_test.sh_ datapath test and, for the control plane, by the
-_srv6_l2_evpn_frr_test.sh_ smoke test (BGP EVPN convergence between grout and
-a standalone FRR peer).
+_srv6_l2vpn_test.sh_ datapath test and, for the control plane and the
+dataplane, by three smoke tests: _srv6_l2_evpn_frr_test.sh_ (BGP EVPN
+convergence between grout and a standalone FRR peer),
+_srv6_l2_evpn_dataplane_frr_test.sh_ (the peer PE dataplane is a scapy
+script bridging the service SIDs negotiated over BGP) and
+_srv6_l2_evpn_dual_frr_test.sh_ (the peer PE runs a second grout instance
+cabled at L2, exercising the datapath in both directions).
 
 ## Graceful restart
 
