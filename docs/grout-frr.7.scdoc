@@ -77,7 +77,26 @@ _SRv6 L2_ tunnel ports. The operator pre-creates them, enslaves them to the
 EVPN bridge, and zebra discovers them by name: _sr6-\<n\>_ (unicast, End.DT2U
 role), _bum-sr6-\<n\>_ (BUM, End.DT2M role) and _vpws-sr6-\<name\>_ (EVPN VPWS,
 End.DX2 role). Zebra then reprograms them in place through three new dataplane
-operations, which the plugin translates to grout:
+operations, which the plugin translates to grout.
+
+The grout counterpart of those tunnel ports is the _sr6_ interface type
+(_grcli interface add sr6 NAME domain BRIDGE_): a bridge member whose frames
+are SRv6-encapsulated (H.Encaps.L2 or H.Encaps.L2.Red) toward its configured
+remote SID, with a per-port flood flag selecting the unicast (known-unicast
+only, from FDB entries) or BUM (eligible to bridge flooding) role. Frames
+decapsulated at the local End.DT2U/DT2M SIDs are injected into the bridge
+through the port referenced by the SID, so bridge learning, flooding and
+split horizon see it as the ingress interface: remote MACs are never learned
+from it, floods never go back out of it, and a frame decapsulated from a
+remote PE is never re-encapsulated toward another one (the equivalent of the
+Linux _isolated_ bridge-port flag).
+
+BUM replication is PE-local: each PE only encapsulates toward the remote SIDs
+configured on its own SRv6 ports, and with the current one-remote-SID-per-port
+model an EVI spans two PEs. This differs from VXLAN EVPN head-end replication,
+where every PE replicates to every remote VTEP itself; supporting more than
+two PEs requires one SRv6 port per remote on each PE (or per-MAC remote SIDs,
+as the Linux srl2 driver does with its per-FDB NDA_DST).
 
 - *DPLANE_OP_BRPORT_FLAGS* pushes an EVPN bridge-port profile onto a tunnel
   port: never learn (decapsulated frames carry remote MACs), flood only in the
@@ -219,11 +238,13 @@ The plugin logs an error and skips such routes.
 ## SRv6 L2 EVPN datapath
 
 The SRv6 L2 EVPN control plane integration requires the fork (see above); it
-cannot be built against upstream FRR. The L2 service dataplane itself (the
-End.DX2/End.DT2U/End.DT2M decap behaviors and the L2 _H.Encaps_ encapsulation
-on bridge ports) is implemented in the grout SRv6 module; see the
-*SRv6 L2 EVPN support* section above and *grcli-srv6*(1) for the interface
-model.
+cannot be built against upstream FRR. The L2 service dataplane is implemented
+in the grout SRv6 module: the _sr6_ interface type (see the _SRv6 L2 EVPN
+support_ section above), the End.DX2/End.DT2U/End.DT2M local SID behaviors
+and the L2 encapsulation on the SRv6 bridge ports. It is covered by the
+_srv6_l2vpn_test.sh_ datapath test and, for the control plane, by the
+_srv6_l2_evpn_frr_test.sh_ smoke test (BGP EVPN convergence between grout and
+a standalone FRR peer).
 
 ## Graceful restart
 
