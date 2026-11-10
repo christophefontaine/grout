@@ -517,7 +517,9 @@ EOF
 	local tailpid=$!
 
 	if [ -n "$namespace" ]; then
-		ip netns add "$namespace"
+		# Idempotent: a test may create the namespace itself (e.g. to run
+		# a process in it before FRR starts).
+		ip netns add "$namespace" 2>/dev/null || true
 		# Match netns_add's defaults: skip IPv6 DAD and ignore kernel RA
 		# processing so FRR peer netns behave consistently with the rest
 		# of the smoke suite.
