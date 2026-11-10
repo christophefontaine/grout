@@ -2,6 +2,7 @@
 # Copyright (c) 2025 Maxime Leroy, Free Mobile
 
 cli_src += files(
+  'iface.c',
   'localsid.c',
   'route.c',
 )

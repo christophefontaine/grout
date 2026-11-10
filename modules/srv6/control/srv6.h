@@ -3,10 +3,16 @@
 
 #pragma once
 
+#include "iface.h"
 #include "ip6.h"
 #include "nexthop.h"
 
 #include <gr_srv6.h>
+
+// Internal SRv6 L2 service port info structure.
+GR_IFACE_INFO(GR_IFACE_TYPE_SR6, iface_info_sr6, {
+	BASE(gr_iface_info_sr6);
+});
 
 //
 // srv6 local data stored in nexthop priv

@@ -35,6 +35,7 @@ static bool iface_type_valid(gr_iface_type_t type) {
 	case GR_IFACE_TYPE_BOND:
 	case GR_IFACE_TYPE_BRIDGE:
 	case GR_IFACE_TYPE_VXLAN:
+	case GR_IFACE_TYPE_SR6:
 		return true;
 	case GR_IFACE_TYPE_UNDEF:
 	case GR_IFACE_TYPE_COUNT:

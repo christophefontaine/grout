@@ -69,6 +69,9 @@ typedef enum : uint16_t {
 	SR_BEHAVIOR_END_DT6 = 0x0012, // Decaps and IPv6 table lookup.
 	SR_BEHAVIOR_END_DT4 = 0x0013, // Decaps and IPv4 table lookup.
 	SR_BEHAVIOR_END_DT46 = 0x0014, // Decaps and IPv4/IPv6 table lookup.
+	SR_BEHAVIOR_END_DX2 = 0x0015, // Decaps and L2 cross-connect (RFC 9252).
+	SR_BEHAVIOR_END_DT2U = 0x0017, // Decaps and L2 unicast lookup (RFC 9252).
+	SR_BEHAVIOR_END_DT2M = 0x0018, // Decaps and L2 BUM flooding (RFC 9252).
 } gr_srv6_behavior_t;
 
 // Convert SRv6 behavior enum to string representation.
@@ -86,6 +89,12 @@ static inline const char *gr_srv6_behavior_name(gr_srv6_behavior_t b) {
 		return "end.dt4";
 	case SR_BEHAVIOR_END_DT46:
 		return "end.dt46";
+	case SR_BEHAVIOR_END_DX2:
+		return "end.dx2";
+	case SR_BEHAVIOR_END_DT2U:
+		return "end.dt2u";
+	case SR_BEHAVIOR_END_DT2M:
+		return "end.dt2m";
 	}
 	return "?";
 }
@@ -106,4 +115,61 @@ struct gr_nexthop_info_srv6_local {
 	uint8_t block_bits; // Locator-block length in bits (default 32).
 	uint8_t csid_bits; // Compressed SID length in bits (default 16).
 	struct rte_ipv6_addr endx_addr; // END_X: L3 nexthop address (on base iface).
+};
+
+// SRv6 L2 service port (RFC 9252) /////////////////////////////////////////////
+
+// SRv6 port configuration flags.
+typedef enum : uint16_t {
+	// BUM role: the port is eligible to bridge flooding. The unicast
+	// role (flag cleared) only receives known-unicast traffic from FDB
+	// entries, like the "unicast_flood off" bridge-port profile on Linux.
+	GR_SR6_F_FLOOD = GR_BIT16(0),
+#define GR_SR6_F_VALID (GR_SR6_F_FLOOD)
+} gr_sr6_flags_t;
+
+// Convert SRv6 port flag enum to string representation.
+static inline const char *gr_sr6_flag_name(gr_sr6_flags_t f) {
+	switch (f) {
+	case GR_SR6_F_FLOOD:
+		return "flood";
+	}
+	return "?";
+}
+
+// SRv6 port reconfiguration attribute flags.
+#define GR_SR6_SET_ENCAP_VRF GR_BIT64(32)
+#define GR_SR6_SET_VLAN GR_BIT64(33)
+#define GR_SR6_SET_FLAGS GR_BIT64(34)
+#define GR_SR6_SET_SID GR_BIT64(35)
+#define GR_SR6_SET_ENCAP GR_BIT64(36)
+#define GR_SR6_SET_MAC GR_BIT64(37)
+
+// Info structure for GR_IFACE_TYPE_SR6 interfaces.
+//
+// An SRv6 L2 service port is the grout counterpart of the Linux "sr6"
+// netdev: a bridge member standing for an SRv6 L2 service (End.DX2,
+// End.DT2U or End.DT2M). Frames the bridge forwards to it (known unicast
+// from FDB entries, or BUM when the flood flag is set) are encapsulated
+// (H.Encaps.L2 / H.Encaps.L2.Red) toward the remote SID. Frames
+// decapsulated at the local End.DT2U/End.DT2M SIDs are injected into the
+// bridge through the port referenced by the SID nexthop.
+struct gr_iface_info_sr6 {
+	// L3 domain for the encapsulated packets (underlay).
+	uint16_t encap_vrf_id;
+	// FDB vlan for decapsulated frames (0 = untagged / vlan-bundle).
+	uint16_t vlan_id;
+	gr_sr6_flags_t flags;
+	// H.Encaps.L2 (SR_H_ENCAPS) or H.Encaps.L2.Red (SR_H_ENCAPS_RED).
+	gr_srv6_encap_behavior_t encap;
+	// Encapsulation destination, :: = disabled.
+	struct rte_ipv6_addr remote_sid;
+	struct rte_ether_addr mac; // Default to random address.
+};
+
+// The datapath iface embeds the public info struct as the first field of
+// its per-type info area. This lets other modules read the SRv6 port
+// flood eligibility without pulling the srv6 control headers.
+static inline gr_sr6_flags_t gr_sr6_iface_flags(const void *iface_info) {
+	return ((const struct gr_iface_info_sr6 *)iface_info)->flags;
 };
