@@ -2,6 +2,7 @@
 # Copyright (c) 2025 Maxime Leroy
 
 src += files(
+  'srv6_l2_output.c',
   'srv6_local.c',
   'srv6_output.c',
 )
