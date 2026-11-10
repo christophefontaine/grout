@@ -26,6 +26,9 @@ static struct {
 	{SR_BEHAVIOR_END_DT6, "end.dt6"},
 	{SR_BEHAVIOR_END_DT4, "end.dt4"},
 	{SR_BEHAVIOR_END_DT46, "end.dt46"},
+	{SR_BEHAVIOR_END_DX2, "end.dx2"},
+	{SR_BEHAVIOR_END_DT2U, "end.dt2u"},
+	{SR_BEHAVIOR_END_DT2M, "end.dt2m"},
 };
 
 static int str_to_behavior(const char *str, gr_srv6_behavior_t *behavior) {
@@ -101,6 +104,12 @@ static cmd_status_t srv6_localsid_add(struct gr_api_client *c, const struct ec_p
 		if (arg_iface(c, n, "IFACE", GR_IFACE_TYPE_UNDEF, &req->nh.iface_id) < 0)
 			goto out;
 		if (arg_ip6(n, "ADDR", &sr6->endx_addr) < 0)
+			goto out;
+	}
+
+	if (sr6->behavior == SR_BEHAVIOR_END_DX2 || sr6->behavior == SR_BEHAVIOR_END_DT2U
+	    || sr6->behavior == SR_BEHAVIOR_END_DT2M) {
+		if (arg_iface(c, n, "L2_IFACE", GR_IFACE_TYPE_UNDEF, &req->nh.iface_id) < 0)
 			goto out;
 	}
 
@@ -282,6 +291,34 @@ static int ctx_init(struct ec_node *root) {
 			with_help(
 				"Endpoint with decapsulation and specific IPv4/IPv6 table lookup.",
 				ec_node_str("end.dt46", "end.dt46")
+			)
+		),
+		EC_NODE_CMD(
+			EC_NO_ID,
+			"end.dx2 iface L2_IFACE",
+			with_help(
+				"Endpoint with decapsulation and L2 cross-connect (RFC 9252).",
+				ec_node_str("end.dx2", "end.dx2")
+			),
+			with_help(
+				"Attachment circuit interface.",
+				ec_node_dyn("L2_IFACE", complete_iface_names, NULL)
+			)
+		),
+		EC_NODE_CMD(
+			EC_NO_ID,
+			"(end.dt2u|end.dt2m) iface L2_IFACE",
+			with_help(
+				"Endpoint with decapsulation and L2 unicast lookup (RFC 9252).",
+				ec_node_str("end.dt2u", "end.dt2u")
+			),
+			with_help(
+				"Endpoint with decapsulation and L2 BUM flooding (RFC 9252).",
+				ec_node_str("end.dt2m", "end.dt2m")
+			),
+			with_help(
+				"SRv6 L2 service interface attached to a bridge.",
+				ec_node_dyn("L2_IFACE", complete_iface_names, NULL)
 			)
 		)
 	);

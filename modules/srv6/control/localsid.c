@@ -145,6 +145,42 @@ static int srv6_local_nh_import_info(struct nexthop *nh, const void *info) {
 		}
 	}
 
+	if (pub.behavior == SR_BEHAVIOR_END_DX2
+	    || pub.behavior == SR_BEHAVIOR_END_DT2U
+	    || pub.behavior == SR_BEHAVIOR_END_DT2M) {
+		const struct iface *iface = iface_from_id(nh->iface_id);
+
+		if (iface == NULL)
+			return errno_set(ENODEV);
+
+		switch (pub.behavior) {
+		case SR_BEHAVIOR_END_DX2:
+			// The L2 cross-connect output must be a real L2
+			// interface: the decapsulated frame is sent out of it.
+			switch (iface->type) {
+			case GR_IFACE_TYPE_PORT:
+			case GR_IFACE_TYPE_BOND:
+			case GR_IFACE_TYPE_VLAN:
+				break;
+			default:
+				return errno_set(EMEDIUMTYPE);
+			}
+			break;
+		case SR_BEHAVIOR_END_DT2U:
+		case SR_BEHAVIOR_END_DT2M:
+			// The L2 device must be an SRv6 service port attached
+			// to a bridge: decapsulated frames are injected into
+			// the bridge through it.
+			if (iface->type != GR_IFACE_TYPE_SR6)
+				return errno_set(EMEDIUMTYPE);
+			if (iface->mode != GR_IFACE_MODE_BRIDGE)
+				return errno_set(ENOTCONN);
+			break;
+		default:
+			break;
+		}
+	}
+
 	struct nexthop *old_l3_nh = priv->l3_nh;
 	struct srv6_local_key key, old_key;
 	int ret;

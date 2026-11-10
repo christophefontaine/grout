@@ -7,6 +7,7 @@
 #include "l3.h"
 #include "mbuf.h"
 #include "nexthop.h"
+#include "rxtx.h"
 #include "srv6.h"
 
 #include <gr_infra.h>
@@ -20,6 +21,9 @@ enum {
 	IP6_INPUT,
 	IP6_FORWARD,
 	IP6_LOCAL,
+	IFACE_OUTPUT,
+	IFACE_INPUT,
+	BRIDGE_FLOOD,
 	INVALID_PACKET,
 	UNEXPECTED_UPPER,
 	NOT_ALLOWED_UPPER,
@@ -430,7 +434,83 @@ forward:
 	return IP6_INPUT;
 }
 
+//
+// L2 service decapsulation behaviors (RFC 9252):
+//
+//   End.DX2 decapsulates and cross-connects the Ethernet frame to the
+//   SID's output interface,
+//   End.DT2U looks up the inner Ethernet destination in the bridge FDB,
+//   End.DT2M floods the inner Ethernet frame in the bridge.
+//
+// The interface carried by the SID nexthop is the L2 device: the
+// attachment circuit for End.DX2, or the SRv6 service port the local
+// decap SIDs are anchored on for End.DT2U/DT2M. Decapsulated frames are
+// injected into the bridge through that port, so bridge learning and
+// flooding see it as the ingress interface (remote MACs are never
+// learned from it and floods never go back out of it).
+//
+static int process_behav_decap_l2(
+	const struct nexthop *nh,
+	struct rte_mbuf *m,
+	struct nexthop_info_srv6_local *sr_d,
+	struct ip6_info *ip6_info
+) {
+	struct rte_ipv6_routing_ext *sr = ip6_info->sr;
+	struct iface_mbuf_data *d;
+	struct iface *iface;
+
+	// transit is not allowed
+	if (sr != NULL && sr->segments_left > 0)
+		return NO_TRANSIT;
+
+	// the exposed payload must be an Ethernet frame
+	if (unlikely(find_upper_layer(m, ip6_info) < 0))
+		return INVALID_PACKET;
+	if (ip6_info->proto != IPPROTO_ETHERNET)
+		return UNEXPECTED_UPPER;
+
+	iface = iface_from_id(nh->iface_id);
+	if (iface == NULL)
+		return DEST_UNREACH;
+
+	// Update the mbuf hash with the outer flow id to avoid computing a
+	// soft RSS in the bridge.
+	m->hash.usr = rte_be_to_cpu_32(ip6_info->ip6_hdr->vtc_flow) & RTE_IPV6_HDR_FL_MASK;
+
+	// remove tunnel ipv6 + ext headers
+	decap_outer(m, ip6_info);
+
+	// The hw checksum offload only works on the outer IP.
+	m->ol_flags |= RTE_MBUF_F_RX_IP_CKSUM_NONE;
+
+	d = iface_mbuf_data(m);
+	d->iface = iface;
+	memset(&d->vtep, 0, sizeof(d->vtep));
+	if (iface->type == GR_IFACE_TYPE_SR6)
+		d->vlan_id = iface_info_sr6(iface)->vlan_id;
+	else
+		d->vlan_id = 0;
+
+	switch (sr_d->behavior) {
+	case SR_BEHAVIOR_END_DX2:
+		// L2 cross-connect: send the frame out of the attachment circuit.
+		return IFACE_OUTPUT;
+	case SR_BEHAVIOR_END_DT2U:
+		// Bridge FDB lookup (unknown unicast and BUM are flooded).
+		return IFACE_INPUT;
+	case SR_BEHAVIOR_END_DT2M:
+		// RFC 9252: flood in the bridge domain without consulting the
+		// FDB, a known-unicast frame received on the BUM SID is still
+		// flooded. The bridge flood policy and the EVPN split horizon
+		// apply, like for every other bridge flood.
+		return BRIDGE_FLOOD;
+	default:
+		return INVALID_PACKET;
+	}
+}
+
 static inline rte_edge_t srv6_local_process_pkt(
+	const struct nexthop *nh,
 	struct rte_mbuf *m,
 	struct nexthop_info_srv6_local *sr_d,
 	struct ip6_info *ip6_info
@@ -445,6 +525,11 @@ static inline rte_edge_t srv6_local_process_pkt(
 	case SR_BEHAVIOR_END_DT6:
 	case SR_BEHAVIOR_END_DT46:
 		return process_behav_decap(m, sr_d, ip6_info);
+
+	case SR_BEHAVIOR_END_DX2:
+	case SR_BEHAVIOR_END_DT2U:
+	case SR_BEHAVIOR_END_DT2M:
+		return process_behav_decap_l2(nh, m, sr_d, ip6_info);
 
 	default:
 		return INVALID_PACKET;
@@ -477,7 +562,7 @@ srv6_local_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 			t->segleft = ip6_info.sr ? ip6_info.sr->segments_left : 0;
 		}
 
-		edge = srv6_local_process_pkt(m, sr_d, &ip6_info);
+		edge = srv6_local_process_pkt(l3_mbuf_data(m)->nh, m, sr_d, &ip6_info);
 
 next:
 		rte_node_enqueue_x1(graph, node, edge, m);
@@ -501,6 +586,9 @@ static struct rte_node_register srv6_local_node = {
 		[IP6_INPUT] = "ip6_input",
 		[IP6_FORWARD] = "ip6_forward",
 		[IP6_LOCAL] = "ip6_input_local",
+		[IFACE_OUTPUT] = "iface_output",
+		[IFACE_INPUT] = "iface_input",
+		[BRIDGE_FLOOD] = "bridge_flood",
 		[INVALID_PACKET] = "sr6_local_invalid",
 		[UNEXPECTED_UPPER] = "sr6_local_unexpected_upper",
 		[NOT_ALLOWED_UPPER] = "sr6_local_not_allowed_upper",
@@ -533,6 +621,7 @@ mock_func(uint16_t, drop_packets(struct rte_graph *, struct rte_node *, void **,
 mock_func(int, drop_format(char *, size_t, const void *, size_t));
 mock_func(void, ip6_input_register_nexthop_type(gr_nh_type_t, const char *));
 mock_func(struct iface *, get_vrf_iface(uint16_t));
+mock_func(struct iface *, iface_from_id(uint16_t));
 
 struct ipv6_ext_hdr {
 	uint8_t next_hdr;
