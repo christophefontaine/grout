@@ -762,10 +762,20 @@ int grout_client_send_recv(uint32_t req_type, size_t tx_len, const void *tx_data
 	if (grout_ctx.client == NULL)
 		return errno_set(ENOTCONN);
 
-	ret = gr_api_client_send_recv(grout_ctx.client, req_type, tx_len, tx_data, rx_data);
-	if (ret == 0) {
-		gr_log_debug("%s: success", gr_api_message_name(req_type));
-		return 0;
+	// The grout API sockets of the plugin coexist with non-blocking
+	// notification sockets in the same client library: a request can hit
+	// a transient EAGAIN (observed under load, e.g. while zebra bursts
+	// interface events). Retry a few times before giving up: all the
+	// plugin translations are idempotent control plane operations.
+	// gr_api_client_send_recv() returns the response payload length (>= 0)
+	// on success and -errno (< 0) on failure.
+	for (unsigned int i = 0; i < 5; i++) {
+		ret = gr_api_client_send_recv(grout_ctx.client, req_type, tx_len, tx_data, rx_data);
+		if (ret >= 0)
+			return 0;
+		if (errno != EAGAIN)
+			break;
+		usleep(1000);
 	}
 
 	gr_log_err("%s: %s", gr_api_message_name(req_type), strerror(errno));
@@ -973,7 +983,7 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 	case DPLANE_OP_SRV6_ENCAP_SRCADDR_SET:
 		return grout_set_sr_tunsrc(ctx);
 
-#ifdef HAVE_FRR_SRV6_L2EVPN
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
 	case DPLANE_OP_BRPORT_FLAGS:
 		return grout_sr6_brport_flags_ctx(ctx);
 
@@ -994,6 +1004,7 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 	case DPLANE_OP_INTF_SPEED_GET:
 		// Workaround: return fail INTF_SPEED_GET to stop zebra from repeatedly polling.
 		// Speed is already provided via INTF_INSTALL/UPDATE.
+		errno = EOPNOTSUPP;
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 #endif
 
@@ -1001,6 +1012,7 @@ static enum zebra_dplane_result zd_grout_process_update(struct zebra_dplane_ctx 
 		return ZEBRA_DPLANE_REQUEST_SUCCESS;
 
 	default:
+		errno = EOPNOTSUPP;
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 }
@@ -1016,8 +1028,18 @@ static int zd_grout_process(struct zebra_dplane_provider *prov) {
 		if (!ctx)
 			break;
 
+		// Clear errno so that on failure the context carries the errno of
+		// the failed translation (0 = none, e.g. an unsupported
+		// operation) rather than a stale value.
+		errno = 0;
 		ret = zd_grout_process_update(ctx);
 		dplane_ctx_set_status(ctx, ret);
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
+		// Attach the errno of the failed translation for zebra-side
+		// diagnostics (dplane_ctx_get_errno), added in FRR 10.9.
+		if (ret == ZEBRA_DPLANE_REQUEST_FAILURE)
+			dplane_ctx_set_errno(ctx, errno);
+#endif
 		dplane_ctx_set_skip_kernel(ctx);
 		dplane_provider_enqueue_out_ctx(prov, ctx);
 	}

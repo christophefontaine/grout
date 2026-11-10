@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2026 Christophe Fontaine, Red Hat
 
-// SRv6 L2 EVPN (RFC 9252) dataplane operations of the FRR fork carrying
-// FRRouting PR #22570. The content of this file is only enabled when the
-// plugin is built against that fork (meson frr_version 'srv6-l2evpn'
-// defines HAVE_FRR_SRV6_L2EVPN): the operations do not exist in upstream
-// FRR releases.
+// SRv6 L2 EVPN (RFC 9252) dataplane operations, from the FRR fork carrying
+// FRRouting PR #22570 (based on FRR 10.9; the operations do not exist in
+// earlier FRR releases). The content of this file is gated on the FRR
+// version, like the other version-specific features.
 //
 // Model mapping (kernel -> grout):
 //
@@ -13,48 +12,50 @@
 // unicast End.DT2U, "bum-sr6-<n>" BUM End.DT2M, "vpws-sr6-<name>"
 // End.DX2) enslaved to an EVPN bridge. Zebra discovers them by name on
 // the bridge and reprograms them in place through the new dataplane ops.
-// With the grout plugin those interfaces are grout bridge members created
-// by the operator (any member type, e.g. a vlan interface named "sr6-1");
-// zebra discovers them the same way since the plugin reports grout
-// interfaces with their names and bridge enslavement.
+// The grout counterpart is the GR_IFACE_TYPE_SR6 interface: the operator
+// creates it as a bridge member (grcli "interface add sr6 NAME domain
+// BRIDGE"), the plugin reports it to zebra with its name and bridge
+// enslavement, and the ops translate to in-place reconfigurations of
+// that interface:
 //
-// - DPLANE_OP_SR6_UPDATE_SID sets the *encap* segment list of the tunnel
-//   port (the remote PE SID; the all-zero SID resets the port). The
-//   closest grout primitive is an SRv6 output nexthop (GR_NH_T_SR6_OUTPUT)
-//   carrying the segment list, resolved by the underlay in the default
-//   VRF. It is created with origin INTERNAL so that it does not echo back
-//   into zebra. Since grout nexthops are keyed by (vrf, encap behavior,
-//   segment list) and not by interface, the plugin keeps a per-port map
-//   to release the previous nexthop when the segment changes. Once grout
-//   grows the L2 SRv6 service datapath (End.DX2/DT2U/DT2M decap and L2
-//   encap), the bridge ports can be bound to these nexthops.
+// - DPLANE_OP_SR6_UPDATE_SID sets the *encap* segment of the tunnel port
+//   (the remote PE SID; the all-zero SID resets the port). Translated to
+//   the interface remote SID and encap mode (full/reduced); the MTU
+//   carried by the op is applied to the interface, mirroring the kernel
+//   changelink. Frames the bridge forwards to the port are encapsulated
+//   toward the remote SID by the srv6_l2_output node.
 //
-// - DPLANE_OP_BRPORT_FLAGS pushes an EVPN bridge-port profile (learning
-//   off, flooding per role, isolated) onto the tunnel port. grout bridges
-//   have no per-port learning/flood/isolation knobs; the only expressible
-//   part is per-interface FDB learning on VXLAN members, disabled when
-//   the op targets a VXLAN interface (the traffic-less VNI anchor of the
-//   fork's legacy model).
+// - DPLANE_OP_BRPORT_FLAGS pushes an EVPN bridge-port profile onto the
+//   tunnel port: never learn, flood only in the BUM role, always
+//   isolated. Translated to the SRv6 port flood flag: only BUM-role
+//   ports receive bridge floods (the unicast-role port is reachable only
+//   through FDB entries), and the bridge never learns from SRv6 ports.
 //
 // - DPLANE_OP_BRIDGE_VLAN_ADD binds an EVI VLAN onto the tunnel port.
-//   grout bridges are not VLAN-aware (no per-port VLAN filtering); the
-//   EVI vlan is honored where it matters, in the FDB entries programmed
-//   by the MAC install path with the same vlan id.
+//   Translated to the SRv6 port vlan: it is the FDB vlan used for the
+//   frames decapsulated at the local End.DT2U/DT2M SIDs.
+//
+// The local End.DX2/DT2U/DT2M decap SIDs are not programmed through
+// these ops: the fork's bgpd installs them as regular IPv6 /128 routes
+// carrying a seg6local nexthop (see rt_grout.c for the translation, and
+// the "seg6local nexthops are not installed separately" note in the
+// grout-frr(7) manual page).
 
-#ifdef HAVE_FRR_SRV6_L2EVPN
+#include <lib/libfrr.h>
+
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
 
 #include "if_map.h"
 #include "log_grout.h"
 #include "sr6_grout.h"
-#include "zebra_dplane_grout.h"
 
 #include <gr_infra.h>
 #include <gr_l2.h>
 #include <gr_srv6.h>
 
-#include <lib/jhash.h>
-#include <lib/typesafe.h>
 #include <zebra/interface.h>
+
+#include "zebra_dplane_grout.h"
 
 // Encap-mode values of the fork's enum zebra_sr6_encap_mode (zebra_sr6.h
 // is not exported to plugins): FULL keeps the SRH on the wire, REDUCED is
@@ -62,164 +63,50 @@
 #define SR6_ENCAP_MODE_FULL 0
 #define SR6_ENCAP_MODE_REDUCED 1
 
-// All functions in this file run exclusively on the dplane thread
-// (zd_grout_process_update). No locking required.
-
-// grout iface id -> current L2 encap segment //////////////////////////////////
-
-PREDECL_HASH(sr6_port_hash);
-
-struct sr6_port {
-	struct sr6_port_hash_item item;
-	struct in6_addr sid; // current encap segment, :: = none
-	uint16_t iface_id;
-	uint8_t mode; // SR6_ENCAP_MODE_*
-};
-
-static int sr6_port_cmp(const struct sr6_port *a, const struct sr6_port *b) {
-	return numcmp(a->iface_id, b->iface_id);
+// The fork's sr6 tunnel ports are discovered by name: sr6-<n> (unicast),
+// bum-sr6-<n> (BUM) and vpws-sr6-<name> (VPWS).
+static bool is_sr6_iface_name(const char *name) {
+	return strncmp(name, "sr6-", 4) == 0 || strncmp(name, "bum-sr6-", 8) == 0
+	       || strncmp(name, "vpws-sr6-", 9) == 0;
 }
 
-static uint32_t sr6_port_hashfn(const struct sr6_port *e) {
-	return e->iface_id;
+// Verify that the interface the FRR ifindex maps to is actually of the
+// sr6 type in grout. The fork discovers the sr6 tunnel ports by NAME
+// only: nothing guarantees that an interface named sr6-* is of the sr6
+// type, and the type-specific reconfiguration attribute bits overlap the
+// namespaces of the other interface types (GR_SR6_SET_VLAN is
+// GR_PORT_SET_N_TXQS, GR_SR6_SET_SID is GR_PORT_SET_MAC, ...). Sending
+// them to a mistyped interface would silently corrupt its configuration.
+static bool sr6_iface_is_sr6_type(uint16_t iface_id) {
+	struct gr_iface_get_resp *resp = NULL;
+	struct gr_iface_get_req req = {.iface_id = iface_id};
+	bool is_sr6;
+
+	if (grout_client_send_recv(GR_IFACE_GET, sizeof(req), &req, (void **)&resp) < 0)
+		return false;
+
+	is_sr6 = resp->iface.base.type == GR_IFACE_TYPE_SR6;
+	if (!is_sr6)
+		// Give the callers a meaningful errno for the dplane context.
+		errno = EMEDIUMTYPE;
+	free(resp);
+	return is_sr6;
 }
 
-DECLARE_HASH(sr6_port_hash, struct sr6_port, item, sr6_port_cmp, sr6_port_hashfn);
-static struct sr6_port_hash_head sr6_ports = INIT_HASH(sr6_ports);
-
-static struct sr6_port *sr6_port_lookup(uint16_t iface_id) {
-	struct sr6_port key = {.iface_id = iface_id};
-
-	return sr6_port_hash_find(&sr6_ports, &key);
-}
-
-// SRv6 L2 encap output nexthop ///////////////////////////////////////////////
-
-// Fill the nexthop key of an L2 encap nexthop: one segment, encap behavior
-// derived from the fork's encap mode, unspecified encap source so that
-// grout uses the global SRv6 tunnel source (programmed through
-// GR_SRV6_TUNSRC_SET by grout_set_sr_tunsrc()).
-static void sr6_l2encap_nh_fill(struct gr_nexthop *nh, const struct in6_addr *sid, uint8_t mode) {
-	struct gr_nexthop_info_srv6 *sr6 = (struct gr_nexthop_info_srv6 *)nh->info;
-
-	memset(nh->info, 0, sizeof(*sr6) + sizeof(sr6->seglist[0]));
-
-	nh->type = GR_NH_T_SR6_OUTPUT;
-	// INTERNAL: no NEXTHOP_NEW/DELETE events back to zebra, no id
-	// allocation, hidden from the default nexthop listings.
-	nh->origin = GR_NH_ORIGIN_INTERNAL;
-	// The underlay resolves the remote locator: encapsulated packets are
-	// routed in the default VRF, like the kernel sr6 netdev.
-	nh->vrf_id = vrf_frr_to_grout(VRF_DEFAULT);
-
-	sr6->encap_behavior = mode == SR6_ENCAP_MODE_REDUCED ? SR_H_ENCAPS_RED : SR_H_ENCAPS;
-	memcpy(&sr6->seglist[0], sid, sizeof(sr6->seglist[0]));
-	sr6->n_seglist = 1;
-}
-
-static enum zebra_dplane_result sr6_l2encap_nh_add(const struct in6_addr *sid, uint8_t mode) {
-	struct gr_nh_add_req *req;
-	size_t len;
-	int ret;
-
-	len = sizeof(*req) + sizeof(struct gr_nexthop_info_srv6) + sizeof(struct rte_ipv6_addr);
-	req = calloc(1, len);
-	if (req == NULL) {
-		gr_log_err("calloc: %s", strerror(errno));
-		return ZEBRA_DPLANE_REQUEST_FAILURE;
-	}
-
-	req->exist_ok = true;
-	sr6_l2encap_nh_fill(&req->nh, sid, mode);
-
-	ret = grout_client_send_recv(GR_NH_ADD, len, req, NULL);
-	free(req);
-
-	return ret == 0 ? ZEBRA_DPLANE_REQUEST_SUCCESS : ZEBRA_DPLANE_REQUEST_FAILURE;
-}
-
-static enum zebra_dplane_result sr6_l2encap_nh_del(const struct in6_addr *sid, uint8_t mode) {
-	struct gr_nh_del_req *req;
-	size_t len;
-	int ret;
-
-	// GR_NH_DEL matches by nexthop key: the request must carry the same
-	// segment list that was programmed.
-	len = sizeof(*req) + sizeof(struct gr_nexthop_info_srv6) + sizeof(struct rte_ipv6_addr);
-	req = calloc(1, len);
-	if (req == NULL) {
-		gr_log_err("calloc: %s", strerror(errno));
-		return ZEBRA_DPLANE_REQUEST_FAILURE;
-	}
-
-	req->missing_ok = true;
-	sr6_l2encap_nh_fill(&req->nh, sid, mode);
-
-	ret = grout_client_send_recv(GR_NH_DEL, len, req, NULL);
-	free(req);
-
-	return ret == 0 ? ZEBRA_DPLANE_REQUEST_SUCCESS : ZEBRA_DPLANE_REQUEST_FAILURE;
-}
-
-// Delete the encap nexthop of @port unless another port still references
-// the same segment list (nexthops are keyed by segment, not by port).
-static void sr6_l2encap_release(const struct sr6_port *port) {
-	struct sr6_port *other;
-
-	frr_each (sr6_port_hash, &sr6_ports, other) {
-		if (other == port)
-			continue;
-		if (other->mode == port->mode
-		    && memcmp(&other->sid, &port->sid, sizeof(other->sid)) == 0)
-			return;
-	}
-
-	sr6_l2encap_nh_del(&port->sid, port->mode);
-}
-
-void grout_sr6_port_del(uint16_t iface_id) {
-	struct sr6_port *port = sr6_port_lookup(iface_id);
-
-	if (port == NULL)
-		return;
-
-	if (!IN6_IS_ADDR_UNSPECIFIED(&port->sid))
-		sr6_l2encap_release(port);
-
-	sr6_port_hash_del(&sr6_ports, port);
-	XFREE(MTYPE_GROUT_MEM, port);
-}
-
-// Mirror the kernel changelink IFLA_MTU part: apply the sr6 tunnel MTU to
-// the grout interface standing in for the sr6 netdev.
-static void sr6_port_set_mtu(uint16_t iface_id, uint32_t mtu) {
-	struct gr_iface_set_req *req = calloc(1, sizeof(*req));
-
-	if (req == NULL) {
-		gr_log_err("calloc: %s", strerror(errno));
-		return;
-	}
-
-	req->set_attrs = GR_IFACE_SET_MTU;
-	req->iface.base.id = iface_id;
-	req->iface.base.mtu = mtu;
-
-	grout_client_send_recv(GR_IFACE_SET, sizeof(*req), req, NULL);
-	free(req);
-}
-
-// DPLANE_OP_SR6_UPDATE_SID ///////////////////////////////////////////////////
+// DPLANE_OP_SR6_UPDATE_SID /////////////////////////////////////////////////
 
 enum zebra_dplane_result grout_sr6_update_sid_ctx(struct zebra_dplane_ctx *ctx) {
 	const struct in6_addr *sid = dplane_ctx_get_sr6_sid(ctx);
 	ifindex_t ifindex = dplane_ctx_get_ifindex(ctx);
 	uint32_t mtu = dplane_ctx_get_ifp_mtu(ctx);
 	uint16_t iface_id = ifindex_frr_to_grout(ifindex);
-	enum zebra_dplane_result ret = ZEBRA_DPLANE_REQUEST_SUCCESS;
+	struct gr_iface_set_req *req;
+	struct gr_iface_info_sr6 *info;
 	uint8_t mode = dplane_ctx_get_sr6_mode_present(ctx) ? dplane_ctx_get_sr6_mode(ctx)
 							    : SR6_ENCAP_MODE_FULL;
-	struct sr6_port *port;
 	bool reset = IN6_IS_ADDR_UNSPECIFIED(sid);
+	size_t len;
+	int ret;
 
 	gr_log_debug(
 		"%s iface %u sid %pI6 mtu %u mode %s",
@@ -231,119 +118,174 @@ enum zebra_dplane_result grout_sr6_update_sid_ctx(struct zebra_dplane_ctx *ctx) 
 	);
 
 	if (iface_id == GR_IFACE_ID_UNDEF) {
+		// A missing mapping is transient (grout reconnect window).
+		// Zebra does not retry dplane_sr6_program on a dplane failure,
+		// but the op is re-issued when the interface is re-added on
+		// reconnect (zebra_sr6_if_add) or on the next EVPN realize, so
+		// failing here only delays the programming.
 		if (reset)
 			return ZEBRA_DPLANE_REQUEST_SUCCESS;
 		gr_log_err("iface %u has no grout mapping", ifindex);
+		errno = ENODEV;
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 
-	port = sr6_port_lookup(iface_id);
-	if (port == NULL) {
-		if (reset)
+	if (!sr6_iface_is_sr6_type(iface_id)) {
+		if (reset) {
+			// Nothing was ever programmed on it: any program op
+			// would have failed the same check.
 			return ZEBRA_DPLANE_REQUEST_SUCCESS;
-		port = XCALLOC(MTYPE_GROUT_MEM, sizeof(*port));
-		port->iface_id = iface_id;
-		sr6_port_hash_add(&sr6_ports, port);
+		}
+		gr_log_err(
+			"iface %u is not an sr6 interface (discovered by name only)", ifindex
+		);
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 
-	// Release the previous segment when it changes: SRv6 output nexthops
-	// are keyed by segment list, so adding the new one would leave the old
-	// one behind (the kernel changelink replaces the netdev SRH in place).
-	if (!IN6_IS_ADDR_UNSPECIFIED(&port->sid)
-	    && (reset || memcmp(&port->sid, sid, sizeof(port->sid)) != 0 || port->mode != mode))
-		sr6_l2encap_release(port);
-
-	if (reset) {
-		memset(&port->sid, 0, sizeof(port->sid));
-		return ZEBRA_DPLANE_REQUEST_SUCCESS;
-	}
-
-	// Always (re)programmed, even when unchanged: idempotent refresh of
-	// a nexthop lost to a grout restart (zebra re-issues the op when the
-	// interface is re-added on reconnect).
-	ret = sr6_l2encap_nh_add(sid, mode);
-	if (ret != ZEBRA_DPLANE_REQUEST_SUCCESS)
-		return ret;
-
-	port->sid = *sid;
-	port->mode = mode;
-
-	if (mtu != 0)
-		sr6_port_set_mtu(iface_id, mtu);
-
-	return ZEBRA_DPLANE_REQUEST_SUCCESS;
-}
-
-// DPLANE_OP_BRPORT_FLAGS /////////////////////////////////////////////////////
-
-enum zebra_dplane_result grout_sr6_brport_flags_ctx(struct zebra_dplane_ctx *ctx) {
-	bool is_bum = dplane_ctx_get_br_is_bum(ctx);
-	ifindex_t ifindex = dplane_ctx_get_ifindex(ctx);
-	struct gr_iface_set_req *req;
-	struct interface *ifp;
-	size_t len;
-
-	gr_log_debug("iface %u is_bum %u", ifindex, is_bum);
-
-	/*
-	 * The kernel op pushes an EVPN bridge-port profile onto the sr6 port:
-	 * never learn (decapped frames carry remote MACs), flood only in the
-	 * BUM role, always isolated (split horizon). grout bridges have no
-	 * per-port learning/flood/isolation control, and learning of remote
-	 * MACs is inherently off in the EVPN model anyway (remote MACs are
-	 * installed as external FDB entries, never learned). Flooding is a
-	 * bridge-level property (GR_BRIDGE_F_FLOOD).
-	 *
-	 * The one expressible part: when the op targets a VXLAN interface
-	 * (the fork's legacy model keeps a traffic-less VNI anchor), turn
-	 * its FDB learning off, mirroring the kernel "learning off".
-	 */
-	ifp = if_lookup_by_index(ifindex, dplane_ctx_get_vrf(ctx));
-	if (ifp == NULL || !IS_ZEBRA_IF_VXLAN(ifp))
-		return ZEBRA_DPLANE_REQUEST_SUCCESS;
-
-	len = sizeof(*req) + sizeof(struct gr_iface_info_vxlan);
+	// In-place reprogram of the SRv6 port: {remote SID, encap mode, MTU},
+	// exactly the triplet the kernel changelink carries. The all-zero SID
+	// disables the encapsulation.
+	len = sizeof(*req) + sizeof(*info);
 	req = calloc(1, len);
 	if (req == NULL) {
 		gr_log_err("calloc: %s", strerror(errno));
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 
-	req->set_attrs = GR_VXLAN_SET_FLAGS;
-	req->iface.base.id = ifindex_frr_to_grout(ifindex);
-	req->iface.base.type = GR_IFACE_TYPE_VXLAN;
-	// GR_VXLAN_F_LEARN is the only vxlan flag: zeroed flags disable the
-	// dynamic FDB learning of the bridged anchor.
+	req->set_attrs = GR_SR6_SET_SID | GR_SR6_SET_ENCAP;
+	if (mtu != 0)
+		req->set_attrs |= GR_IFACE_SET_MTU;
+	req->iface.base.id = iface_id;
+	req->iface.base.type = GR_IFACE_TYPE_SR6;
+	req->iface.base.mtu = mtu;
 
-	if (grout_client_send_recv(GR_IFACE_SET, len, req, NULL) < 0) {
-		free(req);
+	info = (struct gr_iface_info_sr6 *)req->iface.info;
+	memcpy(&info->remote_sid, sid, sizeof(info->remote_sid));
+	info->encap = mode == SR6_ENCAP_MODE_REDUCED ? SR_H_ENCAPS_RED : SR_H_ENCAPS;
+
+	ret = grout_client_send_recv(GR_IFACE_SET, len, req, NULL);
+	free(req);
+
+	return ret == 0 ? ZEBRA_DPLANE_REQUEST_SUCCESS : ZEBRA_DPLANE_REQUEST_FAILURE;
+}
+
+// DPLANE_OP_BRPORT_FLAGS ///////////////////////////////////////////////////
+
+enum zebra_dplane_result grout_sr6_brport_flags_ctx(struct zebra_dplane_ctx *ctx) {
+	bool is_bum = dplane_ctx_get_br_is_bum(ctx);
+	ifindex_t ifindex = dplane_ctx_get_ifindex(ctx);
+	struct gr_iface_set_req *req = NULL;
+	struct interface *ifp;
+	size_t len = 0;
+	int ret;
+
+	gr_log_debug("iface %u is_bum %u", ifindex, is_bum);
+
+	/*
+	 * The kernel op pushes an EVPN bridge-port profile onto the sr6 port:
+	 * never learn, flood only in the BUM role, always isolated. grout
+	 * never learns on SRv6 ports and isolation is inherent (floods never
+	 * go back out of the decap injection port); the flood role is the
+	 * port's FLOOD flag.
+	 *
+	 * The op is also used on the VXLAN interface anchoring a VNI in the
+	 * fork's legacy model: translate the "learning off" part there.
+	 *
+	 * A missing FRR ifindex -> grout mapping (grout reconnect window)
+	 * makes the sr6 type check fail and the op fall through to the name
+	 * warning below: the flood flag is not programmed right away, but the
+	 * op is re-issued when the interface is re-added on reconnect or on
+	 * the next EVPN realize, like DPLANE_OP_SR6_UPDATE_SID, so the window
+	 * only delays the programming.
+	 */
+	ifp = if_lookup_by_index(ifindex, dplane_ctx_get_vrf(ctx));
+	if (ifp == NULL)
+		return ZEBRA_DPLANE_REQUEST_SUCCESS;
+
+	if (sr6_iface_is_sr6_type(ifindex_frr_to_grout(ifindex))) {
+		len = sizeof(*req) + sizeof(struct gr_iface_info_sr6);
+		req = calloc(1, len);
+		if (req == NULL) {
+			gr_log_err("calloc: %s", strerror(errno));
+			return ZEBRA_DPLANE_REQUEST_FAILURE;
+		}
+
+		req->set_attrs = GR_SR6_SET_FLAGS;
+		req->iface.base.id = ifindex_frr_to_grout(ifindex);
+		req->iface.base.type = GR_IFACE_TYPE_SR6;
+		((struct gr_iface_info_sr6 *)req->iface.info)->flags =
+			is_bum ? GR_SR6_F_FLOOD : 0;
+	} else if (IS_ZEBRA_IF_VXLAN(ifp)) {
+		len = sizeof(*req) + sizeof(struct gr_iface_info_vxlan);
+		req = calloc(1, len);
+		if (req == NULL) {
+			gr_log_err("calloc: %s", strerror(errno));
+			return ZEBRA_DPLANE_REQUEST_FAILURE;
+		}
+
+		req->set_attrs = GR_VXLAN_SET_FLAGS;
+		req->iface.base.id = ifindex_frr_to_grout(ifindex);
+		req->iface.base.type = GR_IFACE_TYPE_VXLAN;
+		// GR_VXLAN_F_LEARN is the only vxlan flag: zeroed flags
+		// disable the dynamic FDB learning of the bridged anchor.
+	} else {
+		// Not an SRv6 port nor a VXLAN anchor: nothing to translate.
+		// Warn on a name/type mismatch so operator mistakes surface.
+		if (is_sr6_iface_name(ifp->name))
+			gr_log_warn(
+				"iface %s matches an sr6 port name but is not an sr6 interface",
+				ifp->name
+			);
+		return ZEBRA_DPLANE_REQUEST_SUCCESS;
+	}
+
+	ret = grout_client_send_recv(GR_IFACE_SET, len, req, NULL);
+	free(req);
+
+	return ret == 0 ? ZEBRA_DPLANE_REQUEST_SUCCESS : ZEBRA_DPLANE_REQUEST_FAILURE;
+}
+
+// DPLANE_OP_BRIDGE_VLAN_ADD ////////////////////////////////////////////////
+
+enum zebra_dplane_result grout_sr6_bridge_vlan_add_ctx(struct zebra_dplane_ctx *ctx) {
+	vlanid_t vid = dplane_ctx_get_br_vid(ctx);
+	ifindex_t ifindex = dplane_ctx_get_ifindex(ctx);
+	uint16_t iface_id = ifindex_frr_to_grout(ifindex);
+	struct gr_iface_set_req *req;
+	size_t len;
+	int ret;
+
+	gr_log_debug("iface %u vid %u", ifindex, vid);
+
+	if (!sr6_iface_is_sr6_type(iface_id)) {
+		gr_log_err(
+			"iface %u is not an sr6 interface (discovered by name only)", ifindex
+		);
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 
+	// The FDB vlan of the SRv6 port: decapsulated frames are looked up
+	// and flooded with it (grout FDB entries are keyed by bridge, MAC and
+	// vlan). The vlan id an EVPN control plane installs remote MAC FDB
+	// entries with. Only sent to sr6 interfaces: the reconfiguration
+	// attribute bits are per-type namespaces, another interface type
+	// would reinterpret them as its own attributes.
+	len = sizeof(*req) + sizeof(struct gr_iface_info_sr6);
+	req = calloc(1, len);
+	if (req == NULL) {
+		gr_log_err("calloc: %s", strerror(errno));
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
+	}
+
+	req->set_attrs = GR_SR6_SET_VLAN;
+	req->iface.base.id = iface_id;
+	req->iface.base.type = GR_IFACE_TYPE_SR6;
+	((struct gr_iface_info_sr6 *)req->iface.info)->vlan_id = vid;
+
+	ret = grout_client_send_recv(GR_IFACE_SET, len, req, NULL);
 	free(req);
-	return ZEBRA_DPLANE_REQUEST_SUCCESS;
+
+	return ret == 0 ? ZEBRA_DPLANE_REQUEST_SUCCESS : ZEBRA_DPLANE_REQUEST_FAILURE;
 }
 
-// DPLANE_OP_BRIDGE_VLAN_ADD //////////////////////////////////////////////////
-
-enum zebra_dplane_result grout_sr6_bridge_vlan_add_ctx(struct zebra_dplane_ctx *ctx) {
-	gr_log_debug(
-		"iface %u vid %u untagged %u pvid %u",
-		dplane_ctx_get_ifindex(ctx),
-		dplane_ctx_get_br_vid(ctx),
-		dplane_ctx_get_br_untagged(ctx),
-		dplane_ctx_get_br_pvid(ctx)
-	);
-
-	/*
-	 * The kernel op binds the EVI VLAN onto the sr6 bridge port (AF_BRIDGE
-	 * vlan membership). grout bridges are not VLAN-aware: there is no
-	 * per-port VLAN filtering, so there is nothing to program. The vlan id
-	 * is honored where it matters: the MAC install path programs remote
-	 * MAC FDB entries with the same vlan id (grout FDB entries are keyed
-	 * by (bridge, mac, vlan)).
-	 */
-	return ZEBRA_DPLANE_REQUEST_SUCCESS;
-}
-
-#endif // HAVE_FRR_SRV6_L2EVPN
+#endif // FRR >= 10.9

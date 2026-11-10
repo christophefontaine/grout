@@ -3,9 +3,12 @@
 
 #pragma once
 
-#ifdef HAVE_FRR_SRV6_L2EVPN
+#include <lib/libfrr.h>
 
-#include <stdint.h>
+// The SRv6 L2 EVPN dataplane operations come from the FRR fork carrying
+// FRRouting PR #22570, based on FRR 10.9: they do not exist in earlier
+// FRR releases.
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
 
 #include <zebra/zebra_dplane.h>
 
@@ -22,8 +25,4 @@ enum zebra_dplane_result grout_sr6_brport_flags_ctx(struct zebra_dplane_ctx *ctx
 // membership of an SRv6 tunnel port on its bridge.
 enum zebra_dplane_result grout_sr6_bridge_vlan_add_ctx(struct zebra_dplane_ctx *ctx);
 
-// Forget the encap state tracked for a removed grout interface (iface
-// delete path of grout_link_change).
-void grout_sr6_port_del(uint16_t iface_id);
-
-#endif // HAVE_FRR_SRV6_L2EVPN
+#endif // FRR >= 10.9

@@ -98,6 +98,7 @@ void grout_link_change(struct gr_iface *gr_if, bool new, bool startup) {
 	const struct gr_iface_info_port *gr_port = NULL;
 	const struct gr_iface_info_bond *gr_bond = NULL;
 	const struct gr_iface_info_vrf *gr_vrf = NULL;
+	const struct gr_iface_info_sr6 *gr_sr6 = NULL;
 
 	ifindex_t bridge_ifindex = IFINDEX_INTERNAL;
 	ifindex_t link_ifindex = IFINDEX_INTERNAL;
@@ -158,6 +159,14 @@ void grout_link_change(struct gr_iface *gr_if, bool new, bool startup) {
 		link_type = ZEBRA_LLT_ETHER;
 		zif_type = ZEBRA_IF_VXLAN;
 		mac = &gr_vxlan->mac;
+		break;
+	case GR_IFACE_TYPE_SR6:
+		// SRv6 L2 service port: presented as a plain bridge slave, the
+		// fork's SRv6 L2 EVPN code discovers it by name (sr6-<n>,
+		// bum-sr6-<n>, vpws-sr6-<name>) on the EVPN bridge.
+		gr_sr6 = (const struct gr_iface_info_sr6 *)&gr_if->info;
+		link_type = ZEBRA_LLT_ETHER;
+		mac = &gr_sr6->mac;
 		break;
 	case GR_IFACE_TYPE_UNDEF:
 	default:
@@ -275,10 +284,6 @@ void grout_link_change(struct gr_iface *gr_if, bool new, bool startup) {
 		dplane_ctx_set_status(ctx, ZEBRA_DPLANE_REQUEST_QUEUED);
 		if (gr_vxlan != NULL)
 			l3vni_del_iface(gr_if->id);
-#ifdef HAVE_FRR_SRV6_L2EVPN
-		// Drop the SRv6 L2 encap state tracking this interface.
-		grout_sr6_port_del(gr_if->id);
-#endif
 		remove_mapping_by_grout_ifindex(gr_if->id);
 	}
 

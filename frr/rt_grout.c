@@ -288,6 +288,32 @@ static int grout_gr_nexthop_to_frr_nexthop(
 		case SR_BEHAVIOR_END_DT46:
 			action = ZEBRA_SEG6_LOCAL_ACTION_END_DT46;
 			break;
+		case SR_BEHAVIOR_END_DX2:
+		case SR_BEHAVIOR_END_DT2U:
+		case SR_BEHAVIOR_END_DT2M:
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
+			// SRv6 L2 service (RFC 9252): the iface is the L2
+			// device, the attachment circuit for End.DX2 or the
+			// SRv6 bridge port for End.DT2U/DT2M.
+			ctx.ifindex = ifindex_grout_to_frr(gr_nh->iface_id);
+			switch (sr6->behavior) {
+			case SR_BEHAVIOR_END_DX2:
+				action = ZEBRA_SEG6_LOCAL_ACTION_END_DX2;
+				break;
+			case SR_BEHAVIOR_END_DT2U:
+				action = ZEBRA_SEG6_LOCAL_ACTION_END_DT2U;
+				break;
+			case SR_BEHAVIOR_END_DT2M:
+				action = ZEBRA_SEG6_LOCAL_ACTION_END_DT2M;
+				break;
+			default:
+				break;
+			}
+			break;
+#else
+			gr_log_err("unsupported srv6 behavior %s", gr_srv6_behavior_name(sr6->behavior));
+			return -1;
+#endif
 		}
 
 		ctx.table = vrf_grout_to_frr(sr6->out_vrf_id);
@@ -566,7 +592,7 @@ enum zebra_dplane_result grout_add_del_route(struct zebra_dplane_ctx *ctx) {
 	}
 	// TODO: other check for metric, distance, and so-on
 
-#ifdef HAVE_FRR_SRV6_L2EVPN
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
 	/*
 	 * The srv6-l2evpn fork does not enqueue DPLANE_OP_NH_INSTALL for NHEs
 	 * whose nexthop carries a seg6local action: the kernel rejects
@@ -858,6 +884,26 @@ grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *n
 			memcpy(&sr6_local->endx_addr,
 			       &nh->nh_srv6->seg6local_ctx.nh6,
 			       sizeof(sr6_local->endx_addr));
+			break;
+#endif
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
+		case ZEBRA_SEG6_LOCAL_ACTION_END_DX2:
+			// L2 cross-connect to the attachment circuit.
+			sr6_local->behavior = SR_BEHAVIOR_END_DX2;
+			sr6_local->out_vrf_id = GR_VRF_ID_UNDEF;
+			req->nh.iface_id = ifindex_frr_to_grout(nh->nh_srv6->seg6local_ctx.ifindex);
+			break;
+		case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+		case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+			// L2 bridge-domain service: the iface is the SRv6 port
+			// the local decap SIDs are anchored on, decapsulated
+			// frames are injected into its bridge through it.
+			sr6_local->behavior = nh->nh_srv6->seg6local_action
+					== ZEBRA_SEG6_LOCAL_ACTION_END_DT2U
+				? SR_BEHAVIOR_END_DT2U
+				: SR_BEHAVIOR_END_DT2M;
+			sr6_local->out_vrf_id = GR_VRF_ID_UNDEF;
+			req->nh.iface_id = ifindex_frr_to_grout(nh->nh_srv6->seg6local_ctx.ifindex);
 			break;
 #endif
 		default:
@@ -1163,10 +1209,19 @@ void grout_macfdb_change(const struct gr_fdb_entry *fdb, bool new) {
 
 enum zebra_dplane_result grout_macfdb_update_ctx(struct zebra_dplane_ctx *ctx) {
 	bool add = dplane_ctx_get_op(ctx) == DPLANE_OP_MAC_INSTALL;
+	uint16_t fdb_iface_id = ifindex_frr_to_grout(dplane_ctx_get_ifindex(ctx));
 	uint32_t req_type;
 	size_t len;
 	void *req;
 	int ret;
+
+#if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 9, 0)
+	// SRv6 remote MACs carry the local unicast sr6 port (End.DT2U)
+	// separately from the bridge context interface: the FDB entry must
+	// point at it so that bridged frames are SRv6-encapsulated.
+	if (dplane_ctx_mac_get_sr6_ifindex(ctx) != 0)
+		fdb_iface_id = ifindex_frr_to_grout(dplane_ctx_mac_get_sr6_ifindex(ctx));
+#endif
 
 	gr_log_debug(
 #if CURRENT_FRR_VERSION >= MAKE_FRRVERSION(10, 6, 0)
@@ -1176,7 +1231,7 @@ enum zebra_dplane_result grout_macfdb_update_ctx(struct zebra_dplane_ctx *ctx) {
 #endif
 		add ? "add" : "del",
 		ifindex_frr_to_grout(dplane_ctx_get_ifindex(ctx)),
-		ifindex_frr_to_grout(dplane_ctx_get_ifindex(ctx)),
+		fdb_iface_id,
 		dplane_ctx_mac_get_addr(ctx),
 		dplane_ctx_mac_get_vlan(ctx),
 		dplane_ctx_mac_get_vtep_ip(ctx)
@@ -1192,7 +1247,7 @@ enum zebra_dplane_result grout_macfdb_update_ctx(struct zebra_dplane_ctx *ctx) {
 	if (add) {
 		struct gr_fdb_add_req *add = req;
 		add->exist_ok = true;
-		add->fdb.iface_id = ifindex_frr_to_grout(dplane_ctx_get_ifindex(ctx));
+		add->fdb.iface_id = fdb_iface_id;
 		add->fdb.bridge_id = ifindex_frr_to_grout(dplane_ctx_mac_get_br_ifindex(ctx));
 		add->fdb.vlan_id = dplane_ctx_mac_get_vlan(ctx);
 		add->fdb.flags = GR_FDB_F_EXTERN;

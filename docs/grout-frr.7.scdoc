@@ -66,12 +66,11 @@ carrying FRRouting PR #22570 (_SathishAviz/SRv6-L2-EVPN_, branch
 _srv6-l2-evpn-support_). That fork adds EVPN E-LAN (Type-2/Type-3) and EVPN
 VPWS (Type-1) over an SRv6 dataplane, decoupled from VXLAN.
 
-Since the operations and ZAPI messages involved do not exist in upstream FRR
-releases, this support is opt-in at build time: configure grout with
-*-Dfrr_version=srv6-l2evpn*, which builds the plugin against the fork and
-defines *HAVE_FRR_SRV6_L2EVPN* for the plugin sources. Code using the new
-interfaces is gated on this define, so the plugin keeps building against
-vanilla FRR (10.5, 10.6, 10.7 and master) without the fork.
+Since the operations and ZAPI messages involved do not exist in earlier FRR
+releases, the plugin code using them is gated on the FRR version (10.9),
+like the other version-specific features. Building against the fork is
+opt-in at build time: configure grout with *-Dfrr_version=srv6-l2evpn*,
+which selects the fork as the FRR subproject.
 
 The fork follows an operator-owned interface model: FRR never creates the
 _SRv6 L2_ tunnel ports. The operator pre-creates them, enslaves them to the
