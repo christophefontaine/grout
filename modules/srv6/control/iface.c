@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Christophe Fontaine
 
+#include "event.h"
 #include "iface.h"
 #include "log.h"
 #include "srv6.h"
 #include "vrf.h"
 
 #include <gr_infra.h>
+#include <gr_ip6.h>
 #include <gr_srv6.h>
 
 #include <rte_ethdev.h>
@@ -63,10 +65,17 @@ static int iface_sr6_reconfig(
 	if (set_attrs & GR_SR6_SET_ENCAP)
 		cur->encap = next->encap;
 
+	// The cached encapsulation headers embed the remote SID, the encap
+	// mode and are resolved in the encap VRF: any of those changing
+	// requires a rebuild.
+	if (set_attrs & (GR_SR6_SET_SID | GR_SR6_SET_ENCAP | GR_SR6_SET_ENCAP_VRF))
+		cur->tpl_gen++;
+
 	return 0;
 }
 
 static int iface_sr6_init(struct iface *iface, const void *api_info) {
+	struct iface_info_sr6 *sr6 = iface_info_sr6(iface);
 	struct gr_iface conf;
 	int ret;
 
@@ -74,11 +83,19 @@ static int iface_sr6_init(struct iface *iface, const void *api_info) {
 	if (iface->mtu == 0)
 		iface->mtu = 1500;
 
+	// Per-worker encapsulation header cache. Zeroed: the first packet
+	// of each worker rebuilds its slot (generation mismatch).
+	sr6->tpl = calloc(RTE_MAX_LCORE, sizeof(*sr6->tpl));
+	if (sr6->tpl == NULL)
+		return errno_set(ENOMEM);
+
 	conf.base = iface->base;
 
 	ret = iface_sr6_reconfig(iface, IFACE_SET_ALL, &conf, api_info);
 	if (ret < 0) {
 		errno = -ret;
+		free(sr6->tpl);
+		sr6->tpl = NULL;
 		return ret;
 	}
 
@@ -90,6 +107,8 @@ static int iface_sr6_fini(struct iface *iface) {
 
 	if (sr6->encap_vrf_id != GR_VRF_ID_UNDEF)
 		vrf_decref(sr6->encap_vrf_id);
+	free(sr6->tpl);
+	sr6->tpl = NULL;
 
 	return 0;
 }
@@ -130,6 +149,22 @@ static const struct iface_type iface_type_sr6 = {
 	.to_api = sr6_to_api,
 };
 
+static void sr6_addr_event_handler(uint32_t /*event*/, const void * /*obj*/) {
+	// An underlay address change may change the encapsulation source
+	// address (the preferred address of the egress interface): rebuild
+	// every cached header.
+	sr6_invalidate_encap_tpls();
+}
+
+void sr6_invalidate_encap_tpls(void) {
+	struct iface *iface = NULL;
+
+	while ((iface = iface_next(GR_IFACE_TYPE_SR6, iface)) != NULL)
+		iface_info_sr6(iface)->tpl_gen++;
+}
+
 RTE_INIT(sr6_iface_constructor) {
 	iface_type_register(&iface_type_sr6);
+	event_subscribe(GR_EVENT_IP6_ADDR_ADD, sr6_addr_event_handler);
+	event_subscribe(GR_EVENT_IP6_ADDR_DEL, sr6_addr_event_handler);
 }

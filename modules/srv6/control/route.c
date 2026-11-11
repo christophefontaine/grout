@@ -128,6 +128,7 @@ static struct api_out srv6_tunsrc_clear(const void * /*request*/, struct api_ctx
 		tunsrc_nh = NULL;
 		// The cached encapsulation headers embed the tunnel source.
 		sr6_output_tpl_gen++;
+		sr6_invalidate_encap_tpls();
 	}
 
 	return api_out(0, 0, NULL);
@@ -169,6 +170,7 @@ static struct api_out srv6_tunsrc_set(const void *request, struct api_ctx *ctx) 
 		nexthop_decref(old_nh);
 	// The cached encapsulation headers embed the tunnel source.
 	sr6_output_tpl_gen++;
+	sr6_invalidate_encap_tpls();
 
 	return api_out(0, 0, NULL);
 }

@@ -10,9 +10,32 @@
 #include <gr_srv6.h>
 
 // Internal SRv6 L2 service port info structure.
+
+// Pre-built H.Encaps.L2 outer header, one cache entry per datapath
+// worker (the workers are registered lcores, the slot index is
+// rte_lcore_id()). The worker owning a slot is its only writer: a
+// worker rebuilds its header when the resolved underlay nexthop or the
+// port encapsulation generation changes. The control plane never
+// touches the slots, it only bumps the generation.
+struct sr6_encap_tpl {
+	uint64_t hdr[8]; // outer IPv6 header + optional SRH, hdr_len bytes used
+	const struct nexthop *nh; // underlay nexthop the header was built for
+	uint32_t gen; // port tpl_gen when the header was built
+	uint16_t hdr_len; // 40 (reduced) or 64 (full: IPv6 + SRH)
+};
+
 GR_IFACE_INFO(GR_IFACE_TYPE_SR6, iface_info_sr6, {
 	BASE(gr_iface_info_sr6);
+	// Encapsulation generation, bumped by the control plane when the
+	// cached headers must be rebuilt (remote SID, encap mode, encap VRF,
+	// tunnel source or underlay address change). Aligned plain store.
+	uint32_t tpl_gen;
+	// Per-worker header cache, allocated at init, freed at fini.
+	struct sr6_encap_tpl *tpl;
 });
+
+// Invalidate the cached encapsulation headers of every SRv6 L2 port.
+void sr6_invalidate_encap_tpls(void);
 
 //
 // srv6 local data stored in nexthop priv

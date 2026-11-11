@@ -8,6 +8,12 @@
 // toward the port's remote SID with H.Encaps.L2 (SRH + Ethernet payload)
 // or H.Encaps.L2.Red (single SID in the destination address, no SRH),
 // then routed to the remote locator by the underlay.
+//
+// The outer header only depends on the port encapsulation config and on
+// the underlay egress (the source address): it is pre-built once per
+// (port, worker, underlay nexthop) and cached in the port info. The
+// underlay route lookup stays per packet, so ECMP and route changes are
+// honored exactly like the VXLAN encapsulation.
 
 #include "graph.h"
 #include "ip6.h"
@@ -19,6 +25,8 @@
 #include "srv6.h"
 
 #include <gr_srv6.h>
+
+#include <string.h>
 
 enum {
 	IP6_OUTPUT = 0,
@@ -53,12 +61,11 @@ static uint16_t srv6_l2_output_process(
 	const struct nexthop_info_l3 *l3;
 	const struct nexthop *underlay;
 	const struct iface_info_sr6 *sr6;
-	struct rte_ipv6_routing_ext *srh;
+	struct sr6_encap_tpl *tpl;
 	struct iface_mbuf_data *d;
 	struct rte_ipv6_hdr *outer_ip6;
 	struct rte_mbuf *m;
-	uint32_t optlen, plen;
-	uint8_t proto;
+	uint16_t plen;
 	rte_edge_t edge;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
@@ -89,44 +96,63 @@ static uint16_t srv6_l2_output_process(
 		}
 		l3_mbuf_data(m)->nh = underlay;
 
-		// Encapsulate the Ethernet frame: outer IPv6 + optional SRH
-		// carrying the single segment.
+		// This worker is the only writer of its cache slot: rebuild the
+		// outer header when the port encapsulation changed (generation)
+		// or when the underlay nexthop changed (ECMP, route update).
+		tpl = &sr6->tpl[rte_lcore_id()];
+		if (unlikely(tpl->gen != sr6->tpl_gen || tpl->nh != underlay)) {
+			const struct nexthop *src_nh;
+			struct rte_ipv6_routing_ext *srh;
+			bool full = sr6->encap != SR_H_ENCAPS_RED;
+
+			// Resolve the encapsulation source address from the
+			// underlay egress interface (global SRv6 tunnel source).
+			src_nh = sr_tunsrc_get(underlay->iface_id, &sr6->remote_sid);
+			if (src_nh == NULL) {
+				edge = NO_ROUTE;
+				goto next;
+			}
+			l3 = nexthop_info_l3(src_nh);
+
+			outer_ip6 = (struct rte_ipv6_hdr *)tpl->hdr;
+			ip6_set_fields(
+				outer_ip6,
+				0,
+				full ? IPPROTO_ROUTING : IPPROTO_ETHERNET,
+				&l3->ipv6,
+				&sr6->remote_sid
+			);
+			if (full) {
+				// H.Encaps.L2: keep the SRH on the wire, the
+				// segment is also the outer destination address.
+				srh = (struct rte_ipv6_routing_ext *)(outer_ip6 + 1);
+				srh->next_hdr = IPPROTO_ETHERNET;
+				srh->hdr_len = (sizeof(*srh) + sizeof(sr6->remote_sid)) / 8 - 1;
+				srh->type = RTE_IPV6_SRCRT_TYPE_4;
+				srh->segments_left = 0;
+				srh->flags = 0;
+				srh->last_entry = 0;
+				((struct rte_ipv6_addr *)(srh + 1))[0] = sr6->remote_sid;
+				tpl->hdr_len = sizeof(*outer_ip6) + sizeof(*srh) + sizeof(sr6->remote_sid);
+			} else {
+				// H.Encaps.L2.Red: the single SID is the outer
+				// destination address, no SRH.
+				tpl->hdr_len = sizeof(*outer_ip6);
+			}
+			tpl->nh = underlay;
+			tpl->gen = sr6->tpl_gen;
+		}
+
+		// Prepend the cached header and patch the per-packet payload
+		// length (the only per-packet field of the outer header).
 		plen = rte_pktmbuf_pkt_len(m);
-		optlen = sr6->encap == SR_H_ENCAPS_RED ? 0 : sizeof(*srh) + sizeof(sr6->remote_sid);
-		outer_ip6 = gr_mbuf_prepend(m, outer_ip6, optlen);
+		outer_ip6 = gr_mbuf_prepend(m, outer_ip6, tpl->hdr_len - sizeof(*outer_ip6));
 		if (unlikely(outer_ip6 == NULL)) {
 			edge = NO_HEADROOM;
 			goto next;
 		}
-
-		if (optlen != 0) {
-			// H.Encaps.L2: keep the SRH on the wire, the segment
-			// is also the outer destination address.
-			srh = PAYLOAD(outer_ip6);
-			srh->next_hdr = IPPROTO_ETHERNET;
-			srh->hdr_len = optlen / 8 - 1;
-			srh->type = RTE_IPV6_SRCRT_TYPE_4;
-			srh->segments_left = 0;
-			srh->flags = 0;
-			srh->last_entry = 0;
-			((struct rte_ipv6_addr *)(srh + 1))[0] = sr6->remote_sid;
-			proto = IPPROTO_ROUTING;
-		} else {
-			// H.Encaps.L2.Red: the single SID is the outer
-			// destination address, no SRH.
-			proto = IPPROTO_ETHERNET;
-		}
-
-		// Resolve the encapsulation source address from the underlay
-		// egress interface (global SRv6 tunnel source).
-		underlay = sr_tunsrc_get(underlay->iface_id, &sr6->remote_sid);
-		if (underlay == NULL) {
-			edge = NO_ROUTE;
-			goto next;
-		}
-		l3 = nexthop_info_l3(underlay);
-
-		ip6_set_fields(outer_ip6, plen + optlen, proto, &l3->ipv6, &sr6->remote_sid);
+		memcpy(outer_ip6, tpl->hdr, tpl->hdr_len);
+		outer_ip6->payload_len = rte_cpu_to_be_16(plen + tpl->hdr_len - sizeof(*outer_ip6));
 		edge = IP6_OUTPUT;
 
 next:
