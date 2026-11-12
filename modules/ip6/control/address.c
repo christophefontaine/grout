@@ -524,14 +524,6 @@ int addr6_delete(uint16_t iface_id, const struct rte_ipv6_addr *ip, uint8_t pref
 	if (nh == NULL)
 		return errno_set(ENOENT);
 
-	event_push(
-		GR_EVENT_IP6_ADDR_DEL,
-		&(struct gr_ip6_ifaddr) {
-			.iface_id = iface->id,
-			.addr = {*ip, prefixlen},
-		}
-	);
-
 	addr6_clear_exposed(nh);
 	nexthop_routes_cleanup(nh, true);
 	while (nh->ref_count > 0)
@@ -541,6 +533,17 @@ int addr6_delete(uint16_t iface_id, const struct rte_ipv6_addr *ip, uint8_t pref
 	vec_del(addrs->nh, i);
 	if (vec_len(addrs->nh) == 0)
 		vec_free(addrs->nh);
+
+	// Notify the deletion only once it is committed: subscribers may
+	// re-read the interface addresses (e.g. the SRv6 encapsulation
+	// source resolution) and must not observe the removed address.
+	event_push(
+		GR_EVENT_IP6_ADDR_DEL,
+		&(struct gr_ip6_ifaddr) {
+			.iface_id = iface->id,
+			.addr = {*ip, prefixlen},
+		}
+	);
 
 	// leave the solicited node multicast group
 	rte_ipv6_solnode_from_addr(&solicited_node, ip);
