@@ -2,6 +2,7 @@
 // Copyright (c) 2025 Olivier Gournet
 
 #include "graph.h"
+#include "iface.h"
 #include "ip4_datapath.h"
 #include "ip6.h"
 #include "ip6_datapath.h"
@@ -28,6 +29,8 @@
 
 enum {
 	IP6_OUTPUT = 0,
+	TOO_BIG,
+	FRAG_NEEDED,
 	INVALID,
 	NO_ROUTE,
 	NO_HEADROOM,
@@ -92,6 +95,7 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 	struct rte_ipv6_routing_ext *srh;
 	struct rte_ipv6_hdr *outer_ip6;
 	const struct nexthop *underlay;
+	const struct iface *iface;
 	uint8_t proto, tc;
 	struct rte_mbuf *m;
 	uint32_t plen, gen;
@@ -236,6 +240,29 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 		// Prepend the cached header, patch the per-packet fields: the
 		// payload length and the family-dependent protocol byte.
 		hdr_len = tpl->hdr_len;
+
+		// RFC 2473 sections 7.1 and 7.2: when the encapsulated packet
+		// does not fit in the underlay MTU, report the tunnel MTU to
+		// the source of the inner packet instead of silently dropping
+		// it. The inner packet is still untouched here, so the error
+		// quotes it rather than the outer header.
+		iface = iface_from_id(underlay->iface_id);
+		if (underlay->type == GR_NH_T_L3 && iface != NULL
+		    && rte_pktmbuf_pkt_len(m) + hdr_len > iface->mtu) {
+			uint16_t mtu = iface->mtu > hdr_len ? iface->mtu - hdr_len : 0;
+
+			if (m->packet_type & RTE_PTYPE_L3_IPV4) {
+				ip_local_mbuf_data(m)->mtu = mtu;
+				edge = FRAG_NEEDED;
+			} else {
+				// RFC 2473 section 7.1(a): never advertise
+				// less than the IPv6 minimum link MTU.
+				ip6_local_mbuf_data(m)->mtu = RTE_MAX(mtu, RTE_IPV6_MIN_MTU);
+				edge = TOO_BIG;
+			}
+			goto next;
+		}
+
 		outer_ip6 = gr_mbuf_prepend(m, outer_ip6, hdr_len - sizeof(*outer_ip6));
 		if (unlikely(outer_ip6 == NULL)) {
 			edge = NO_HEADROOM;
@@ -280,6 +307,8 @@ static struct rte_node_register srv6_output_node = {
 	.nb_edges = EDGE_COUNT,
 	.next_nodes = {
 		[IP6_OUTPUT] = "ip6_output",
+		[TOO_BIG] = "ip6_error_pkt_too_big",
+		[FRAG_NEEDED] = "ip_error_frag_needed",
 		[INVALID] = "sr6_pkt_invalid",
 		[NO_ROUTE] = "sr6_source_no_route",
 		[NO_HEADROOM] = "error_no_headroom",

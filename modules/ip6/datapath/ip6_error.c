@@ -29,6 +29,7 @@ ip6_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 	struct icmp6_err_param_problem *pp;
 	struct icmp6_err_dest_unreach *du;
 	struct icmp6_err_ttl_exceeded *te;
+	struct icmp6_err_pkt_too_big *ptb;
 	const struct nexthop_info_l3 *l3;
 	struct ip6_local_mbuf_data *d;
 	const struct iface *iface;
@@ -62,6 +63,18 @@ ip6_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 				edge = NO_HEADROOM;
 				goto next;
 			}
+			break;
+		case ICMP6_ERR_PKT_TOO_BIG:
+			ptb = gr_mbuf_prepend(mbuf, ptb);
+			if (unlikely(ptb == NULL)) {
+				edge = NO_HEADROOM;
+				goto next;
+			}
+			// RFC 8200 section 4.4: the MTU of the link that is
+			// too small, as computed by the node that dropped the
+			// packet. For a tunnel this is the tunnel MTU (RFC
+			// 2473 section 7.1).
+			ptb->mtu = rte_cpu_to_be_32(ip6_local_mbuf_data(mbuf)->mtu);
 			break;
 		case ICMP6_ERR_TTL_EXCEEDED:
 			te = gr_mbuf_prepend(mbuf, te);
@@ -139,6 +152,14 @@ static int param_problem_init(const struct rte_graph *, struct rte_node *node) {
 	return 0;
 }
 
+// RFC 4443 section 3.2: Packet Too Big.
+static int pkt_too_big_init(const struct rte_graph *, struct rte_node *node) {
+	struct ip6_error_ctx *ctx = ip6_error_ctx(node);
+	ctx->icmp_type = ICMP6_ERR_PKT_TOO_BIG;
+	ctx->icmp_code = 0;
+	return 0;
+}
+
 // RFC 8754 section 4.3: SR Upper-layer Header Error.
 static int param_problem_ulp_init(const struct rte_graph *, struct rte_node *node) {
 	struct ip6_error_ctx *ctx = ip6_error_ctx(node);
@@ -181,6 +202,23 @@ static struct gr_node_info ttl_exceeded_info = {
 	.type = GR_NODE_T_L3,
 };
 
+static struct rte_node_register pkt_too_big_node = {
+	.name = "ip6_error_pkt_too_big",
+	.process = ip6_error_process,
+	.nb_edges = EDGE_COUNT,
+	.next_nodes = {
+		[ICMP_OUTPUT] = "icmp6_output",
+		[NO_HEADROOM] = "error_no_headroom",
+		[NO_IP] = "error_no_local_ip",
+	},
+	.init = pkt_too_big_init,
+};
+
+static struct gr_node_info pkt_too_big_info = {
+	.node = &pkt_too_big_node,
+	.type = GR_NODE_T_L3,
+};
+
 static struct rte_node_register param_problem_node = {
 	.name = "ip6_error_param_problem",
 	.process = ip6_error_process,
@@ -217,5 +255,6 @@ static struct gr_node_info param_problem_ulp_info = {
 
 GR_NODE_REGISTER(dest_unreach_info);
 GR_NODE_REGISTER(ttl_exceeded_info);
+GR_NODE_REGISTER(pkt_too_big_info);
 GR_NODE_REGISTER(param_problem_info);
 GR_NODE_REGISTER(param_problem_ulp_info);

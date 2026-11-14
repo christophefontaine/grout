@@ -98,6 +98,9 @@ ip_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 
 		if (rte_pktmbuf_pkt_len(mbuf) > iface->mtu) {
 			if (ip->fragment_offset & rte_cpu_to_be_16(RTE_IPV4_HDR_DF_FLAG)) {
+				// RFC 1191: advertise the next-hop MTU so
+				// the source can adjust its path MTU.
+				ip_local_mbuf_data(mbuf)->mtu = iface->mtu;
 				edge = FRAG_NEEDED;
 			} else {
 				edge = FRAGMENT;
