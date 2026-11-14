@@ -449,22 +449,15 @@ static int process_behav_end(
 	if (!set_out_vrf_iface(m, sr_d))
 		return DEST_UNREACH;
 
-	// NEXT-CSID processing (RFC 9800)
+	// NEXT-CSID processing (RFC 9800 section 4.1.1, lines N01 to N09)
 	if (sr_d->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
 		struct rte_ipv6_hdr *ip6 = ip6_info->ip6_hdr;
 
+		// A zero argument means this is the last CSID: N09 skips the
+		// whole block and the plain behavior runs with the
+		// destination address left untouched.
 		if (csid_shift(&ip6->dst_addr, sr_d->block_bits, sr_d->csid_bits))
 			goto forward;
-		// Container exhausted: this was the last CSID. A uA (End.X) is a
-		// cross-connect, it must still hand the packet to its L3 adjacency.
-		// Consume the last CSID, leaving the bare locator block, then
-		// forward. A uN (End) falls through to standard End processing.
-		if (sr_d->behavior == SR_BEHAVIOR_END_X) {
-			memset(&ip6->dst_addr.a[sr_d->block_bits / CHAR_BIT],
-			       0,
-			       sr_d->csid_bits / CHAR_BIT);
-			goto forward;
-		}
 	}
 
 	// at the end of the tunnel
@@ -1319,8 +1312,10 @@ static void srv6_end_x_next_csid(void **) {
 	assert_int_equal(fm.ip6.dst_addr.a[5], 0x00);
 }
 
-// uA as the last CSID: the container is exhausted but End.X still crosses the
-// adjacency. The consumed CSID is zeroed, leaving the bare locator block.
+// uA as the last CSID: the container is exhausted, the packet falls through to
+// the plain End.X behavior with its destination address unchanged (RFC 9800
+// section 4.1.1, N09). With no SRH left to cross-connect, the upper layer is
+// processed locally as for a plain End.X with Segments Left zero.
 static void srv6_end_x_next_csid_last(void **) {
 	struct nexthop l3_nh = {0};
 	struct nexthop_info_srv6_local sr_d = {
@@ -1329,29 +1324,50 @@ static void srv6_end_x_next_csid_last(void **) {
 			.out_vrf_id = GR_VRF_ID_UNDEF,
 			.flags = GR_SR_FL_FLAVOR_NEXT_CSID,
 			.block_bits = 32,
-			// node + function: consumes the whole 32 bit CSID
+			// node + function: consumes the whole 32 bit CSID,
+			// leaving a zero argument.
 			.csid_bits = 32,
 		},
 		.l3_nh = &l3_nh,
 	};
 	struct ip6_info info = {0}, expect;
+	struct rte_ipv6_addr da = CSID_CONTAINER;
 	struct fake_mbuf fm;
 
 	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_ICMPV6;
 	fm.ip6.dst_addr = CSID_CONTAINER;
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
-	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), IP6_FORWARD);
-	assert_ptr_equal(l3_mbuf_data(&fm.mbuf)->nh, &l3_nh);
-	// the last CSID is consumed, only the 32 bit locator block remains
-	assert_int_equal(fm.ip6.dst_addr.a[0], 0x5f);
-	assert_int_equal(fm.ip6.dst_addr.a[1], 0x00);
-	assert_int_equal(fm.ip6.dst_addr.a[2], 0x01);
-	assert_int_equal(fm.ip6.dst_addr.a[3], 0x02);
-	assert_int_equal(fm.ip6.dst_addr.a[4], 0x00);
-	assert_int_equal(fm.ip6.dst_addr.a[5], 0x00);
-	assert_int_equal(fm.ip6.dst_addr.a[6], 0x00);
-	assert_int_equal(fm.ip6.dst_addr.a[7], 0x00);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), IP6_LOCAL);
+	assert_memory_equal(&fm.ip6.dst_addr, &da, sizeof(da));
+}
+
+// uN as the last CSID: same fall through to the plain End behavior, the
+// destination is left untouched and the upper layer is processed locally.
+static void srv6_end_next_csid_last(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {
+			.behavior = SR_BEHAVIOR_END,
+			.out_vrf_id = GR_VRF_ID_UNDEF,
+			.flags = GR_SR_FL_FLAVOR_NEXT_CSID,
+			.block_bits = 32,
+			.csid_bits = 32,
+		},
+	};
+	struct ip6_info info = {0}, expect;
+	struct rte_ipv6_addr da = CSID_CONTAINER;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_ICMPV6;
+	fm.ip6.dst_addr = CSID_CONTAINER;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), IP6_LOCAL);
+	assert_memory_equal(&fm.ip6.dst_addr, &da, sizeof(da));
 }
 
 // A packet announcing a payload shorter than the SRH it carries must not
@@ -1396,6 +1412,7 @@ int main(void) {
 		cmocka_unit_test(srv6_end_x_usd_inner_ipv6),
 		cmocka_unit_test(srv6_end_x_usd_no_inner),
 		cmocka_unit_test(srv6_end_next_csid),
+		cmocka_unit_test(srv6_end_next_csid_last),
 		cmocka_unit_test(srv6_end_transit_local_sid),
 		cmocka_unit_test(srv6_end_transit_hop_limit),
 		cmocka_unit_test(srv6_end_transit_remote),
