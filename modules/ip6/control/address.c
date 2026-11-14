@@ -212,6 +212,15 @@ bool addr6_is_local_on_iface(uint16_t iface_id, const struct rte_ipv6_addr *ip) 
 	return false;
 }
 
+bool addr6_is_local(const struct rte_ipv6_addr *ip) {
+	for (uint16_t id = 0; id < gr_config.max_ifaces; id++) {
+		if (addr6_is_local_on_iface(id, ip))
+			return true;
+	}
+
+	return false;
+}
+
 struct nexthop *addr6_get_preferred(uint16_t iface_id, const struct rte_ipv6_addr *dst) {
 	const struct iface *iface;
 	struct iface *vrf_iface;
