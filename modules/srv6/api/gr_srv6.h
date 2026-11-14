@@ -95,6 +95,7 @@ typedef enum : uint8_t {
 	GR_SR_FL_FLAVOR_PSP = GR_BIT8(0), // Penultimate Segment Popping.
 	GR_SR_FL_FLAVOR_USD = GR_BIT8(1), // Ultimate Segment Decapsulation.
 	GR_SR_FL_FLAVOR_NEXT_CSID = GR_BIT8(2), // Compressed SID (RFC 9800).
+	GR_SR_FL_FLAVOR_USP = GR_BIT8(3), // Ultimate Segment Pop of the SRH.
 } gr_srv6_flags_t;
 
 // SRv6 local nexthop information for Local SID processing.

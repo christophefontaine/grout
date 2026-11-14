@@ -19,13 +19,23 @@
 #include <zebra/zebra_l2.h>
 #include <zebra_dplane_grout.h>
 
+static const struct {
+	gr_srv6_flags_t flag;
+	uint32_t frr_op;
+} srv6_flavors[] = {
+	{GR_SR_FL_FLAVOR_PSP, ZEBRA_SEG6_LOCAL_FLV_OP_PSP},
+	{GR_SR_FL_FLAVOR_USP, ZEBRA_SEG6_LOCAL_FLV_OP_USP},
+	{GR_SR_FL_FLAVOR_USD, ZEBRA_SEG6_LOCAL_FLV_OP_USD},
+	{GR_SR_FL_FLAVOR_NEXT_CSID, ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID},
+};
+
 // Reject flavors that grout cannot honour instead of silently installing them as
 // a plain End SID (RFC 9800 section 4.2, e.g. REPLACE-CSID).
 static bool srv6_local_flavors_check(uint32_t flv) {
-	const uint32_t supported = 1u << ZEBRA_SEG6_LOCAL_FLV_OP_PSP
-		| 1u << ZEBRA_SEG6_LOCAL_FLV_OP_USP | 1u << ZEBRA_SEG6_LOCAL_FLV_OP_USD
-		| 1u << ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID;
+	uint32_t supported = 0;
 
+	for (unsigned i = 0; i < ARRAY_DIM(srv6_flavors); i++)
+		supported |= 1u << srv6_flavors[i].frr_op;
 	if ((flv & ~supported) == 0)
 		return true;
 	gr_log_err("unsupported seg6local flavors 0x%x", flv & ~supported);
@@ -264,13 +274,10 @@ static int grout_gr_nexthop_to_frr_nexthop(
 
 		sr6 = (const struct gr_nexthop_info_srv6_local *)gr_nh->info;
 
-		SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USP);
-		if (sr6->flags & GR_SR_FL_FLAVOR_PSP)
-			SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_PSP);
-		if (sr6->flags & GR_SR_FL_FLAVOR_USD)
-			SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USD);
+		for (unsigned i = 0; i < ARRAY_DIM(srv6_flavors); i++)
+			if (sr6->flags & srv6_flavors[i].flag)
+				SET_SRV6_FLV_OP(ctx.flv.flv_ops, srv6_flavors[i].frr_op);
 		if (sr6->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
-			SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID);
 			ctx.flv.lcblock_len = sr6->block_bits;
 			ctx.flv.lcnode_func_len = sr6->csid_bits;
 		}
@@ -867,14 +874,10 @@ grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *n
 
 		if (!srv6_local_flavors_check(flv))
 			goto out;
-		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_PSP))
-			sr6_local->flags |= GR_SR_FL_FLAVOR_PSP;
-		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_USP))
-			gr_log_debug("USP always enabled, ignoring flag");
-		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_USD))
-			sr6_local->flags |= GR_SR_FL_FLAVOR_USD;
-		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID)) {
-			sr6_local->flags |= GR_SR_FL_FLAVOR_NEXT_CSID;
+		for (unsigned i = 0; i < ARRAY_DIM(srv6_flavors); i++)
+			if (CHECK_SRV6_FLV_OP(flv, srv6_flavors[i].frr_op))
+				sr6_local->flags |= srv6_flavors[i].flag;
+		if (sr6_local->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
 			sr6_local->block_bits = nh->nh_srv6->seg6local_ctx.flv.lcblock_len;
 			sr6_local->csid_bits = nh->nh_srv6->seg6local_ctx.flv.lcnode_func_len;
 		}
