@@ -273,13 +273,24 @@ static inline bool set_out_vrf_iface(struct rte_mbuf *m, struct nexthop_info_srv
 //
 // 4.1.1. Upper-Layer Header
 //
-// The USP flavor (4.16.2) is always enabled, by design.
+// RFC 8986 section 4.16.2: the Ultimate Segment Pop flavor removes the SRH
+// when the SID is the last segment. Without it, the SRH is left untouched and
+// the packet is processed as is, so that ICMPv6 errors generated further down
+// the stack still quote the segment list (RFC 9259 section A.2.1).
 //
-static int process_upper_layer(struct rte_mbuf *m, struct ip6_info *ip6_info) {
+static int process_upper_layer(
+	struct rte_mbuf *m,
+	struct nexthop_info_srv6_local *sr_d,
+	struct ip6_info *ip6_info
+) {
 	if (ip6_info->sr) {
-		if (unlikely(!decap_srv6(m, ip6_info)))
-			return INVALID_PACKET;
+		if (sr_d->flags & GR_SR_FL_FLAVOR_USP) {
+			if (unlikely(!decap_srv6(m, ip6_info)))
+				return INVALID_PACKET;
+		}
 
+		// find_upper_layer() resumes after the SRH, whether it was
+		// removed or not.
 		if (unlikely(find_upper_layer(m, ip6_info) < 0))
 			return INVALID_PACKET;
 	}
@@ -345,7 +356,7 @@ static int process_behav_decap(
 		break;
 
 	default:
-		return process_upper_layer(m, ip6_info);
+		return process_upper_layer(m, sr_d, ip6_info);
 	}
 
 	// Update the mbuf hash with ip6 flow id
@@ -464,7 +475,7 @@ static int process_behav_end(
 			return process_behav_decap(m, sr_d, ip6_info);
 
 		// process locally
-		return process_upper_layer(m, ip6_info);
+		return process_upper_layer(m, sr_d, ip6_info);
 	}
 
 	// transit
@@ -967,9 +978,14 @@ static void srv6_parse_srh_bad_segments_left(void **) {
 
 // RFC 8986 section 4.1.1, S04: an upper layer that the SID refuses to process
 // is reported in an ICMPv6 Parameter Problem, Code 4, pointing at it.
+// With the USP flavor, the SRH is removed first (section 4.16.2).
 static void srv6_end_not_allowed_upper(void **) {
 	struct nexthop_info_srv6_local sr_d = {
-		.base = {.behavior = SR_BEHAVIOR_END, .out_vrf_id = GR_VRF_ID_UNDEF},
+		.base = {
+			.behavior = SR_BEHAVIOR_END,
+			.out_vrf_id = GR_VRF_ID_UNDEF,
+			.flags = GR_SR_FL_FLAVOR_USP,
+		},
 	};
 	struct ip6_info info = {0}, expect;
 	struct fake_mbuf fm;
@@ -981,7 +997,30 @@ static void srv6_end_not_allowed_upper(void **) {
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
 	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), NOT_ALLOWED_UPPER);
 	// the SRH was popped: the pointer is relative to the remaining header
+	assert_null(info.sr);
 	assert_int_equal(info.err_offset, sizeof(struct rte_ipv6_hdr));
+}
+
+// Without the USP flavor, the SRH is left in the packet and the upper layer
+// pointer takes it into account.
+static void srv6_end_no_usp(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END, .out_vrf_id = GR_VRF_ID_UNDEF},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+	uint16_t data_len;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_TCP;
+	data_len = fm.mbuf.data_len;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), NOT_ALLOWED_UPPER);
+	assert_int_equal(fm.mbuf.data_len, data_len);
+	assert_non_null(info.sr);
+	assert_int_equal(info.err_offset, data_len);
 }
 
 // An End.DT6 SID receiving an IPv4 packet reports the upper layer error too.
@@ -1347,6 +1386,7 @@ int main(void) {
 		cmocka_unit_test(srv6_parse_srh_bad_segments_left),
 		cmocka_unit_test(srv6_decap_payload_len_underflow),
 		cmocka_unit_test(srv6_end_not_allowed_upper),
+		cmocka_unit_test(srv6_end_no_usp),
 		cmocka_unit_test(srv6_end_dt6_unexpected_upper),
 		cmocka_unit_test(srv6_end_dt4_transit),
 		cmocka_unit_test(srv6_end_t_local_delivery_vrf),

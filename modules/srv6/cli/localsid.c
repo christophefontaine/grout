@@ -74,6 +74,8 @@ static cmd_status_t srv6_localsid_add(struct gr_api_client *c, const struct ec_p
 			str = ec_strvec_val(v, i);
 			if (!strcmp(str, "psp"))
 				sr6->flags |= GR_SR_FL_FLAVOR_PSP;
+			if (!strcmp(str, "usp"))
+				sr6->flags |= GR_SR_FL_FLAVOR_USP;
 			if (!strcmp(str, "usd"))
 				sr6->flags |= GR_SR_FL_FLAVOR_USD;
 			if (!strcmp(str, "next-csid"))
@@ -120,6 +122,11 @@ static void srv6_local_format_flavors(char *buf, size_t len, gr_srv6_flags_t fla
 		if (n > 0)
 			SAFE_BUF(snprintf, len, " ");
 		SAFE_BUF(snprintf, len, "psp");
+	}
+	if (flags & GR_SR_FL_FLAVOR_USP) {
+		if (n > 0)
+			SAFE_BUF(snprintf, len, " ");
+		SAFE_BUF(snprintf, len, "usp");
 	}
 	if (flags & GR_SR_FL_FLAVOR_USD) {
 		if (n > 0)
@@ -196,8 +203,9 @@ static int ctx_init(struct ec_node *root) {
 
 	flavor_node = EC_NODE_CMD(
 		"FLAVORS",
-		"(psp,usd,next-csid)",
+		"(psp,usp,usd,next-csid)",
 		with_help("Penultimate Segment Pop of the SRH", ec_node_str("psp", "psp")),
+		with_help("Ultimate Segment Pop of the SRH", ec_node_str("usp", "usp")),
 		with_help("Ultimate Segment Decapsulation of the SRH", ec_node_str("usd", "usd")),
 		with_help("NEXT-CSID uSID flavor (RFC 9800)", ec_node_str("next-csid", "next-csid"))
 	);

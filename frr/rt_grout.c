@@ -251,9 +251,10 @@ static int grout_gr_nexthop_to_frr_nexthop(
 
 		sr6 = (const struct gr_nexthop_info_srv6_local *)gr_nh->info;
 
-		SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USP);
 		if (sr6->flags & GR_SR_FL_FLAVOR_PSP)
 			SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_PSP);
+		if (sr6->flags & GR_SR_FL_FLAVOR_USP)
+			SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USP);
 		if (sr6->flags & GR_SR_FL_FLAVOR_USD)
 			SET_SRV6_FLV_OP(ctx.flv.flv_ops, ZEBRA_SEG6_LOCAL_FLV_OP_USD);
 		if (sr6->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
@@ -830,7 +831,7 @@ grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *n
 		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_PSP))
 			sr6_local->flags |= GR_SR_FL_FLAVOR_PSP;
 		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_USP))
-			gr_log_debug("USP always enabled, ignoring flag");
+			sr6_local->flags |= GR_SR_FL_FLAVOR_USP;
 		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_USD))
 			sr6_local->flags |= GR_SR_FL_FLAVOR_USD;
 		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID)) {
