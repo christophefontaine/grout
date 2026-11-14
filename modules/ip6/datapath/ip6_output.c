@@ -94,6 +94,13 @@ ip6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 			goto next;
 		}
 
+		// Oversize packets are dropped here rather than answered with
+		// an ICMPv6 Packet Too Big: this node has no way to tell the
+		// source which tunnel the packet came from, so it does not
+		// fill ip6_local_mbuf_data()->mtu either. The SRv6
+		// encapsulation node reports the tunnel MTU before the packet
+		// reaches this point, while the inner packet is still intact
+		// (RFC 2473 sections 7.1 and 7.2).
 		if (rte_pktmbuf_pkt_len(mbuf) > iface->mtu) {
 			edge = TOO_BIG;
 			goto next;

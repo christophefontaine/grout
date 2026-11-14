@@ -2,6 +2,7 @@
 // Copyright (c) 2025 Olivier Gournet
 
 #include "graph.h"
+#include "iface.h"
 #include "ip4_datapath.h"
 #include "ip6.h"
 #include "ip6_datapath.h"
@@ -17,6 +18,8 @@
 
 enum {
 	IP6_OUTPUT = 0,
+	TOO_BIG,
+	FRAG_NEEDED,
 	INVALID,
 	NO_ROUTE,
 	NO_HEADROOM,
@@ -54,17 +57,20 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 	uint8_t proto, tc, n_omitted_segs;
 	const struct nexthop_info_l3 *l3;
 	struct rte_ipv6_routing_ext *srh;
+	const struct rte_ipv6_addr *src;
+	const struct nexthop *underlay;
 	struct rte_ipv6_hdr *outer_ip6;
-	const struct nexthop *nh;
+	const struct iface *iface;
 	uint32_t optlen, plen;
 	struct rte_mbuf *m;
+	uint16_t hdr_len;
 	rte_edge_t edge;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
 		m = objs[i];
 
-		nh = l3_mbuf_data(m)->nh;
-		d = nexthop_info_srv6_output(nh);
+		underlay = l3_mbuf_data(m)->nh;
+		d = nexthop_info_srv6_output(underlay);
 
 		if (gr_mbuf_is_traced(m)) {
 			struct trace_srv6_data *t = gr_mbuf_trace_add(m, node, sizeof(*t));
@@ -116,6 +122,55 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 			optlen += sizeof(*srh)
 				+ ((d->n_seglist - n_omitted_segs) * sizeof(d->seglist[0]));
 
+		// Resolve the underlay nexthop before touching the packet: the
+		// MTU check below must quote the inner packet, and the source
+		// address depends on the egress interface.
+		underlay = fib6_lookup(
+			underlay->vrf_id, GR_IFACE_ID_UNDEF, d->seglist, m->hash.rss
+		);
+		if (underlay == NULL) {
+			edge = NO_ROUTE;
+			goto next;
+		}
+		l3_mbuf_data(m)->nh = underlay;
+
+		if (d->flags & SR_ENCAP_F_SRC) {
+			src = &d->encap_src;
+		} else {
+			const struct nexthop *src_nh;
+
+			src_nh = sr_tunsrc_get(underlay->iface_id, &d->seglist[0]);
+			if (src_nh == NULL) {
+				edge = NO_ROUTE;
+				goto next;
+			}
+			l3 = nexthop_info_l3(src_nh);
+			src = &l3->ipv6;
+		}
+
+		// RFC 2473 sections 7.1 and 7.2: when the encapsulated packet
+		// does not fit in the underlay MTU, report the tunnel MTU to
+		// the source of the inner packet instead of silently dropping
+		// it. The inner packet is still untouched here, so the error
+		// quotes it rather than the outer header.
+		hdr_len = sizeof(*outer_ip6) + optlen;
+		iface = iface_from_id(underlay->iface_id);
+		if (underlay->type == GR_NH_T_L3 && iface != NULL
+		    && rte_pktmbuf_pkt_len(m) + hdr_len > iface->mtu) {
+			uint16_t mtu = iface->mtu > hdr_len ? iface->mtu - hdr_len : 0;
+
+			if (m->packet_type & RTE_PTYPE_L3_IPV4) {
+				ip_local_mbuf_data(m)->mtu = mtu;
+				edge = FRAG_NEEDED;
+			} else {
+				// RFC 2473 section 7.1(a): never advertise
+				// less than the IPv6 minimum link MTU.
+				ip6_local_mbuf_data(m)->mtu = RTE_MAX(mtu, RTE_IPV6_MIN_MTU);
+				edge = TOO_BIG;
+			}
+			goto next;
+		}
+
 		outer_ip6 = gr_mbuf_prepend(m, outer_ip6, optlen);
 		if (unlikely(outer_ip6 == NULL)) {
 			edge = NO_HEADROOM;
@@ -142,25 +197,7 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 			plen += optlen;
 		}
 
-		// Resolve nexthop for the encapsulated packet.
-		nh = fib6_lookup(nh->vrf_id, GR_IFACE_ID_UNDEF, d->seglist, m->hash.rss);
-		if (nh == NULL) {
-			edge = NO_ROUTE;
-			goto next;
-		}
-		l3_mbuf_data(m)->nh = nh;
-
-		if (d->flags & SR_ENCAP_F_SRC) {
-			ip6_set_fields(outer_ip6, plen, proto, &d->encap_src, &d->seglist[0]);
-		} else {
-			nh = sr_tunsrc_get(nh->iface_id, &d->seglist[0]);
-			if (nh == NULL) {
-				edge = NO_ROUTE;
-				goto next;
-			}
-			l3 = nexthop_info_l3(nh);
-			ip6_set_fields(outer_ip6, plen, proto, &l3->ipv6, &d->seglist[0]);
-		}
+		ip6_set_fields(outer_ip6, plen, proto, src, &d->seglist[0]);
 		// RFC 2473 section 5.1.1.1: the outer Traffic Class inherits the
 		// inner one, so that DSCP and ECN marking survive the tunnel.
 		// RFC 6438: set a Flow Label so that transit routers can load
@@ -193,6 +230,8 @@ static struct rte_node_register srv6_output_node = {
 	.nb_edges = EDGE_COUNT,
 	.next_nodes = {
 		[IP6_OUTPUT] = "ip6_output",
+		[TOO_BIG] = "ip6_error_pkt_too_big",
+		[FRAG_NEEDED] = "ip_error_frag_needed",
 		[INVALID] = "sr6_pkt_invalid",
 		[NO_ROUTE] = "sr6_source_no_route",
 		[NO_HEADROOM] = "error_no_headroom",

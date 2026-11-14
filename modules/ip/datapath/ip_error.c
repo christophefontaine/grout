@@ -35,12 +35,14 @@ ip_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, ui
 	ip4_addr_t src, dst;
 	rte_edge_t edge;
 	unsigned len;
+	uint16_t mtu;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
 		mbuf = objs[i];
 
 		ip = rte_pktmbuf_mtod(mbuf, struct rte_ipv4_hdr *);
 		src = ip->src_addr;
+		mtu = ip_local_mbuf_data(mbuf)->mtu;
 		// RFC792 payload size: ip header + 64 bits of original datagram
 		len = rte_ipv4_hdr_len(ip) + 8;
 		rte_pktmbuf_trim(mbuf, rte_pktmbuf_pkt_len(mbuf) - len);
@@ -84,7 +86,13 @@ ip_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, ui
 		icmp->icmp_code = ctx->icmp_code;
 		icmp->icmp_cksum = 0;
 		icmp->icmp_ident = 0;
-		icmp->icmp_seq_nb = 0;
+		// RFC 1191: the unused half of the header carries the next-hop
+		// MTU for a Fragmentation Needed error, zero otherwise.
+		if (ctx->icmp_type == RTE_ICMP_TYPE_DEST_UNREACHABLE
+		    && ctx->icmp_code == RTE_ICMP_CODE_UNREACH_FRAG)
+			icmp->icmp_seq_nb = rte_cpu_to_be_16(mtu);
+		else
+			icmp->icmp_seq_nb = 0;
 
 		edge = ICMP_OUTPUT;
 next:
