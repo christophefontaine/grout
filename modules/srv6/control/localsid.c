@@ -31,6 +31,18 @@ static inline void set_srv6_local_key(
 	key->iface_id = iface_id;
 }
 
+// Fill in the NEXT-CSID default lengths. This is called from the lookup path as
+// well as at import time, so that a second API call that omits the defaults
+// finds the nexthop it already created instead of computing a different key.
+static void srv6_local_info_normalize(struct gr_nexthop_info_srv6_local *pub) {
+	if (pub->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
+		if (pub->block_bits == 0)
+			pub->block_bits = 32;
+		if (pub->csid_bits == 0)
+			pub->csid_bits = 16;
+	}
+}
+
 static int srv6_local_reconfig(const struct gr_nexthop_config *c) {
 	char name[64];
 	snprintf(name, sizeof(name), "nexthop-srv6-local-%u", c->max_count);
@@ -78,10 +90,13 @@ static bool srv6_local_nh_equal(const struct nexthop *a, const struct nexthop *b
 }
 
 static struct nexthop *srv6_local_nh_lookup(const struct gr_nexthop_base *base, const void *info) {
+	struct gr_nexthop_info_srv6_local normalized;
 	struct srv6_local_key key;
 	struct nexthop *nh;
 
-	set_srv6_local_key(&key, base->iface_id, info);
+	normalized = *(const struct gr_nexthop_info_srv6_local *)info;
+	srv6_local_info_normalize(&normalized);
+	set_srv6_local_key(&key, base->iface_id, &normalized);
 
 	if (rte_hash_lookup_data(srv6_local_hash, &key, (void **)&nh) < 0)
 		return errno_set_null(ENOENT);
@@ -95,11 +110,9 @@ static int srv6_local_nh_import_info(struct nexthop *nh, const void *info) {
 	struct nexthop *l3_nh = NULL;
 	bool l3_nh_created = false;
 
+	srv6_local_info_normalize(&pub);
+
 	if (pub.flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
-		if (pub.block_bits == 0)
-			pub.block_bits = 32;
-		if (pub.csid_bits == 0)
-			pub.csid_bits = 16;
 		if (pub.block_bits % CHAR_BIT != 0 || pub.csid_bits % CHAR_BIT != 0)
 			return errno_set(EDOM);
 		if (pub.block_bits + pub.csid_bits > RTE_IPV6_MAX_DEPTH)
