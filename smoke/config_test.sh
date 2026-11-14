@@ -111,8 +111,12 @@ grcli -j address show iface p3 | jq -e '.[] | select(.address == "2348::1/24")' 
 grcli -j address show iface p3 | jq -e '.[] | select(.address | startswith("fe80:"))' || fail "p3 should still have link-local after flush"
 
 # Test SRv6 tunsrc set/clear (internal nexthop with no VRF)
+# The source must be an address configured on this node (RFC 8986 S02).
+grcli address add fd00::1/128 iface p3
 grcli tunsrc set fd00::1 || fail "tunsrc set should succeed"
 grcli tunsrc show | grep -qF 'fd00::1' || fail "tunsrc addr should be fd00::1"
+grcli tunsrc set fd00::2 && fail "tunsrc set with a non-local address should fail"
+grcli tunsrc show | grep -qF 'fd00::1' || fail "a refused tunsrc set must not change the address"
 grcli tunsrc clear || fail "tunsrc clear should succeed"
 grcli tunsrc show | grep -qF '::' || fail "tunsrc addr should be unspec after clear"
 

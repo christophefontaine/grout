@@ -179,7 +179,7 @@ static int ctx_init(struct ec_node *root) {
 		with_help("Encaps.", ec_node_str("h.encaps", "h.encaps")),
 		with_help("Encaps Reduced.", ec_node_str("h.encaps.red", "h.encaps.red")),
 		with_help("Next SID to visit.", ec_node_re("SEGLIST", IPV6_RE)),
-		with_help("Encap source address.", ec_node_re("SRC", IPV6_RE)),
+		with_help("Encap source address (must be local).", ec_node_re("SRC", IPV6_RE)),
 		with_help("Nexthop ID.", ec_node_uint("ID", 1, UINT32_MAX - 1, 10)),
 		with_help("L3 routing domain name.", ec_node_dyn("VRF", complete_vrf_names, NULL))
 	);
@@ -190,7 +190,7 @@ static int ctx_init(struct ec_node *root) {
 		"set SRC",
 		srv6_tunsrc_set,
 		"Set Segment Routing SRv6 source address",
-		with_help("Ipv6 address to use as source.", ec_node_re("SRC", IPV6_RE))
+		with_help("Local Ipv6 address to use as source.", ec_node_re("SRC", IPV6_RE))
 	);
 	if (ret < 0)
 		return ret;

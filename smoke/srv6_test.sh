@@ -121,6 +121,15 @@ ip netns exec n1 timeout 5 tcpdump -c1 -pnnli x-p1 ip6 src $encap_src  || {
 wait $ping_pid
 
 #
+# RFC 8986 section 5.1 S02: the encapsulation source must be an address
+# configured on the node. Spoofed sources are refused.
+#
+grcli tunsrc set fd00:102::666 && fail "a non-local tunnel source was accepted"
+grcli nexthop add srv6 seglist fd00:202:200:: src fd00:102::666 id 49 \
+	&& fail "a non-local encap source was accepted"
+grcli nexthop show id 49 && fail "the refused nexthop was created anyway"
+
+#
 # Outer Traffic Class and Flow Label test
 #
 # RFC 2473 section 5.1.1.1: the encapsulated packet inherits the DSCP and

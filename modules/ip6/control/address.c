@@ -212,6 +212,17 @@ bool addr6_is_local_on_iface(uint16_t iface_id, const struct rte_ipv6_addr *ip) 
 	return false;
 }
 
+bool addr6_is_local(const struct rte_ipv6_addr *ip) {
+	struct iface *iface = NULL;
+
+	while ((iface = iface_next(GR_IFACE_TYPE_UNDEF, iface)) != NULL) {
+		if (addr6_is_local_on_iface(iface->id, ip))
+			return true;
+	}
+
+	return false;
+}
+
 struct nexthop *addr6_get_preferred(uint16_t iface_id, const struct rte_ipv6_addr *dst) {
 	const struct iface *iface;
 	struct iface *vrf_iface;
