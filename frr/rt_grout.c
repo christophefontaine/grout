@@ -689,6 +689,12 @@ static enum zebra_dplane_result grout_del_nexthop(uint32_t nh_id) {
 	return ZEBRA_DPLANE_REQUEST_SUCCESS;
 }
 
+// Flavors that grout can honour. Any other bit must fail the install instead of
+// silently behaving as a plain End SID.
+#define SRV6_FLV_SUPPORTED                                                                         \
+	((1u << ZEBRA_SEG6_LOCAL_FLV_OP_PSP) | (1u << ZEBRA_SEG6_LOCAL_FLV_OP_USP)                 \
+	 | (1u << ZEBRA_SEG6_LOCAL_FLV_OP_USD) | (1u << ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID))
+
 static enum zebra_dplane_result
 grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *nh) {
 	enum zebra_dplane_result ret = ZEBRA_DPLANE_REQUEST_FAILURE;
@@ -854,6 +860,10 @@ grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *n
 
 		uint32_t flv = nh->nh_srv6->seg6local_ctx.flv.flv_ops;
 
+		if (flv & ~SRV6_FLV_SUPPORTED) {
+			gr_log_err("unsupported seg6local flavors 0x%x", flv & ~SRV6_FLV_SUPPORTED);
+			goto out;
+		}
 		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_PSP))
 			sr6_local->flags |= GR_SR_FL_FLAVOR_PSP;
 		if (CHECK_SRV6_FLV_OP(flv, ZEBRA_SEG6_LOCAL_FLV_OP_USP))
