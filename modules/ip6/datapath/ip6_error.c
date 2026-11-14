@@ -26,6 +26,7 @@ enum edges {
 static uint16_t
 ip6_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
 	const struct ip6_error_ctx *ctx = ip6_error_ctx(node);
+	struct icmp6_err_param_problem *pp;
 	struct icmp6_err_dest_unreach *du;
 	struct icmp6_err_ttl_exceeded *te;
 	const struct nexthop_info_l3 *l3;
@@ -69,6 +70,16 @@ ip6_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 				goto next;
 			}
 			break;
+		case ICMP6_ERR_PARAM_PROBLEM:
+			pp = gr_mbuf_prepend(mbuf, pp);
+			if (unlikely(pp == NULL)) {
+				edge = NO_HEADROOM;
+				goto next;
+			}
+			// Offset of the erroneous field, pointing in the packet
+			// quoted below.
+			pp->offset = rte_cpu_to_be_32(ip6_local_mbuf_data(mbuf)->ext_offset);
+			break;
 		default:
 			ABORT("unexpected icmp_type value %hhu", ctx->icmp_type);
 			break;
@@ -106,53 +117,34 @@ next:
 	return nb_objs;
 }
 
-static int ttl_exceeded_init(const struct rte_graph *, struct rte_node *node) {
-	struct ip6_error_ctx *ctx = ip6_error_ctx(node);
-	ctx->icmp_type = ICMP6_ERR_TTL_EXCEEDED;
-	ctx->icmp_code = 0;
-	return 0;
-}
+// Declare an ip6_error node reporting the given ICMPv6 error type and code.
+#define IP6_ERROR_NODE(_name, _type, _code)                                                        \
+	static int _name##_init(const struct rte_graph *, struct rte_node *node) {                 \
+		struct ip6_error_ctx *ctx = ip6_error_ctx(node);                                   \
+		ctx->icmp_type = _type;                                                            \
+		ctx->icmp_code = _code;                                                            \
+		return 0;                                                                          \
+	}                                                                                          \
+	static struct rte_node_register _name##_node = {                                       \
+		.name = "ip6_error_" #_name,                                                   \
+		.process = ip6_error_process,                                                  \
+		.nb_edges = EDGE_COUNT,                                                        \
+		.next_nodes = {                                                                \
+			[ICMP_OUTPUT] = "icmp6_output",                                        \
+			[NO_HEADROOM] = "error_no_headroom",                                   \
+			[NO_IP] = "error_no_local_ip",                                         \
+		},                                                                             \
+		.init = _name##_init,                                                          \
+	};   \
+	static struct gr_node_info _name##_info = {                                                \
+		.node = &_name##_node,                                                             \
+		.type = GR_NODE_T_L3,                                                              \
+	};                                                                                         \
+	GR_NODE_REGISTER(_name##_info)
 
-static int no_route_init(const struct rte_graph *, struct rte_node *node) {
-	struct ip6_error_ctx *ctx = ip6_error_ctx(node);
-	ctx->icmp_type = ICMP6_ERR_DEST_UNREACH;
-	ctx->icmp_code = 0;
-	return 0;
-}
-
-static struct rte_node_register dest_unreach_node = {
-	.name = "ip6_error_dest_unreach",
-	.process = ip6_error_process,
-	.nb_edges = EDGE_COUNT,
-	.next_nodes = {
-		[ICMP_OUTPUT] = "icmp6_output",
-		[NO_HEADROOM] = "error_no_headroom",
-		[NO_IP] = "error_no_local_ip",
-	},
-	.init = no_route_init,
-};
-
-static struct rte_node_register ttl_exceeded_node = {
-	.name = "ip6_error_ttl_exceeded",
-	.process = ip6_error_process,
-	.nb_edges = EDGE_COUNT,
-	.next_nodes = {
-		[ICMP_OUTPUT] = "icmp6_output",
-		[NO_HEADROOM] = "error_no_headroom",
-		[NO_IP] = "error_no_local_ip",
-	},
-	.init = ttl_exceeded_init,
-};
-
-static struct gr_node_info dest_unreach_info = {
-	.node = &dest_unreach_node,
-	.type = GR_NODE_T_L3,
-};
-
-static struct gr_node_info ttl_exceeded_info = {
-	.node = &ttl_exceeded_node,
-	.type = GR_NODE_T_L3,
-};
-
-GR_NODE_REGISTER(dest_unreach_info);
-GR_NODE_REGISTER(ttl_exceeded_info);
+IP6_ERROR_NODE(dest_unreach, ICMP6_ERR_DEST_UNREACH, 0)
+IP6_ERROR_NODE(ttl_exceeded, ICMP6_ERR_TTL_EXCEEDED, 0)
+// RFC 8200 section 4.4: erroneous header field.
+IP6_ERROR_NODE(param_problem, ICMP6_ERR_PARAM_PROBLEM, 0)
+// RFC 8754 section 4.3: SR Upper-layer Header Error.
+IP6_ERROR_NODE(param_problem_ulp, ICMP6_ERR_PARAM_PROBLEM, 4)
