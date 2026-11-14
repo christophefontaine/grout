@@ -2,6 +2,7 @@
 // Copyright (c) 2025 Olivier Gournet
 
 #include "event.h"
+#include "log.h"
 #include "module.h"
 #include "rcu.h"
 #include "srv6.h"
@@ -10,6 +11,8 @@
 #include <gr_srv6.h>
 
 #include <rte_malloc.h>
+
+LOG_TYPE("srv6");
 
 // routes ////////////////////////////////////////////////////////////////
 static bool srv6_output_nh_equal(const struct nexthop *a, const struct nexthop *b) {
@@ -44,6 +47,12 @@ static int srv6_output_nh_import_info(struct nexthop *nh, const void *info) {
 	// validating it: bound it here (the CLI already does).
 	if (pub->n_seglist == 0 || pub->n_seglist > GR_SRV6_ROUTE_SEGLIST_COUNT_MAX)
 		return errno_set(EINVAL);
+
+	// RFC 8986 section 5.1 S02: the encapsulation source is an address
+	// configured on this node. Refuse a spoofed source instead of letting
+	// it through to the wire.
+	if (!rte_ipv6_addr_is_unspec(&pub->encap_src) && !addr6_is_local(&pub->encap_src))
+		return errno_log(EADDRNOTAVAIL, "encap source is not a local address");
 
 	// Build the datapath snapshot: the encapsulation config, the
 	// segment list and one pre-built header slot per worker in a
@@ -134,6 +143,12 @@ static struct api_out srv6_tunsrc_set(const void *request, struct api_ctx *ctx) 
 
 	if (rte_ipv6_addr_is_unspec(&req->addr))
 		return srv6_tunsrc_clear(NULL, ctx);
+
+	// RFC 8986 section 5.1 S02: T is an address configured on the node.
+	// Accepting an arbitrary address would put a spoofed source on the
+	// wire and break return routing.
+	if (!addr6_is_local(&req->addr))
+		return api_out(EADDRNOTAVAIL, 0, NULL);
 
 	if (tunsrc_nh != NULL) {
 		struct nexthop_info_l3 *old = nexthop_info_l3(tunsrc_nh);

@@ -107,6 +107,8 @@ struct nexthop *addr6_get_linklocal(uint16_t iface_id);
 struct hoplist *addr6_get_all(uint16_t iface_id);
 
 bool addr6_is_local_on_iface(uint16_t iface_id, const struct rte_ipv6_addr *ip);
+// check if an address is configured on any interface
+bool addr6_is_local(const struct rte_ipv6_addr *ip);
 // delete an ipv6 address from an interface
 int addr6_delete(uint16_t iface_id, const struct rte_ipv6_addr *, uint8_t prefixlen);
 

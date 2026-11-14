@@ -54,7 +54,9 @@ set_srv6_localsid locator_grout fd00:202 fd00:202:100::
 set_ip_route fd00:202::/32 fd00:102::2
 
 # SRv6 route with explicit per-nexthop encap source via FRR
+# The source must be a local address: grout refuses a spoofed one.
 encap_src=fd00:102::42
+set_ip_address p1 $encap_src/128
 set_srv6_route --encap-src $encap_src 192.168.0.0/16 p1 fd00:202:200::
 
 # capture and verify the outer source address
