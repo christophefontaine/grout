@@ -166,23 +166,21 @@ static int ip6_parse_to_srh(struct rte_mbuf *m, struct ip6_info *ip6_info) {
 			return -1;
 		}
 
-		// RFC 8754 section 4.1: walk_ext_headers() only reports type 4 headers.
-		// hdr_len is in 8B units (excl. first 8B)
-		// -> ext_len = 8 * (hdr_len + 1)
-		// each segment is 16B = 2x8B
-		// -> nsegs = hdr_len/2
-		// -> at least one segment, last_entry < hdr_len/2
+		// RFC 8754 section 4.1: walk_ext_headers() only reports type 4
+		// headers. hdr_len counts the 8B units after the first 8B of the
+		// SRH, and a segment is 2 of them, so a header with at least one
+		// segment has hdr_len >= 2 and last_entry < hdr_len / 2. Reject a
+		// shorter header before dividing by two.
 		if (sr->hdr_len < 2) {
 			ip6_local_mbuf_data(m)->ext_offset = sr_offset
 				+ offsetof(struct rte_ipv6_routing_ext, hdr_len);
 			return -1;
 		}
-		if (sr->last_entry > sr->hdr_len / 2 - 1) {
-			ip6_local_mbuf_data(m)->ext_offset = sr_offset
-				+ offsetof(struct rte_ipv6_routing_ext, last_entry);
-			return -1;
-		}
-		if (sr->segments_left > sr->last_entry + 1) {
+		// RFC 8754 section 4.3.1.1, S10-S12: both conditions are
+		// reported by an ICMPv6 Parameter Problem pointing at the
+		// Segments Left field, even the one about Last Entry.
+		if (sr->last_entry + 1 > sr->hdr_len / 2
+		    || sr->segments_left > sr->last_entry + 1) {
 			ip6_local_mbuf_data(m)->ext_offset = sr_offset
 				+ offsetof(struct rte_ipv6_routing_ext, segments_left);
 			return -1;
@@ -970,7 +968,8 @@ static void srv6_parse_srh_no_segment(void **) {
 	);
 }
 
-// last_entry must index an existing segment.
+// last_entry must index an existing segment. RFC 8754 section 4.3.1.1, S12:
+// the Parameter Problem points at Segments Left, not at Last Entry.
 static void srv6_parse_srh_bad_last_entry(void **) {
 	struct ip6_info info = {0}, expect;
 	struct fake_mbuf fm;
@@ -981,7 +980,7 @@ static void srv6_parse_srh_bad_last_entry(void **) {
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
 	assert_int_equal(
-		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 4
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 3
 	);
 }
 
