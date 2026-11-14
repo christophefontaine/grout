@@ -11,6 +11,8 @@
 
 #include <gr_infra.h>
 
+#include <stddef.h>
+
 //
 // references are to rfc8986
 //
@@ -41,6 +43,8 @@ struct ip6_info {
 	uint8_t *sr_prev_nh;
 	struct rte_ipv6_hdr *ip6_hdr;
 	struct rte_ipv6_routing_ext *sr;
+	// Offset of the field that failed parsing, for ICMP Parameter Problem.
+	uint16_t err_offset;
 };
 
 static const uint8_t is_ipv6_ext[256] = {
@@ -60,22 +64,46 @@ static int walk_ext_headers(struct rte_mbuf *m, struct ip6_info *ip6_info, bool 
 		size_t ext_len = 0;
 		int next_proto;
 		uint8_t *ext;
+		uint16_t ext_offset;
 
 		// minimal precheck: rte_ipv6_get_next_ext() touches at most 2 bytes
-		if (unlikely(ip6_info->ext_offset + 2 > data_len))
+		ext_offset = ip6_info->ext_offset;
+		if (unlikely(ext_offset + 2 > data_len)) {
+			ip6_info->err_offset = ext_offset;
 			return -1;
+		}
 
-		ext = rte_pktmbuf_mtod_offset(m, uint8_t *, ip6_info->ext_offset);
+		ext = rte_pktmbuf_mtod_offset(m, uint8_t *, ext_offset);
 		next_proto = rte_ipv6_get_next_ext(ext, ip6_info->proto, &ext_len);
 		// is_ipv6_ext already checked current proto is a valid IPv6 extension
 		assert(next_proto >= 0 && next_proto < 256);
-		ip6_info->ext_offset += ext_len;
+
+		// RFC 8200 section 4.5: an extension header that does not fit in
+		// the packet must be discarded. rte_ipv6_get_next_ext() computes
+		// ext_len from the header itself and never clamps it.
+		if (unlikely(ext_offset + ext_len > data_len)) {
+			ip6_info->err_offset = ext_offset;
+			return -1;
+		}
+		ip6_info->ext_offset = ext_offset + (uint16_t)ext_len;
 
 		if (stop_sr && ip6_info->proto == IPPROTO_ROUTING) {
-			ip6_info->proto = (uint8_t)next_proto;
-			ip6_info->sr = (struct rte_ipv6_routing_ext *)ext;
-			ip6_info->sr_len = ext_len;
-			break;
+			struct rte_ipv6_routing_ext *sr = (void *)ext;
+
+			// RFC 8200 section 4.4: a routing header with an
+			// unrecognized routing type is ignored when Segments
+			// Left is zero, and rejected otherwise.
+			if (sr->type == RTE_IPV6_SRCRT_TYPE_4) {
+				ip6_info->proto = (uint8_t)next_proto;
+				ip6_info->sr = sr;
+				ip6_info->sr_len = ext_len;
+				break;
+			}
+			if (sr->segments_left != 0) {
+				ip6_info->err_offset = ext_offset
+					+ offsetof(struct rte_ipv6_routing_ext, type);
+				return -1;
+			}
 		}
 
 		ip6_info->proto = (uint8_t)next_proto;
@@ -84,9 +112,6 @@ static int walk_ext_headers(struct rte_mbuf *m, struct ip6_info *ip6_info, bool 
 		if (stop_sr)
 			ip6_info->sr_prev_nh = ext;
 	} while (is_ipv6_ext[ip6_info->proto]);
-
-	if (unlikely(ip6_info->ext_offset > data_len))
-		return -1;
 
 	return 0;
 }
@@ -124,23 +149,34 @@ static int ip6_parse_to_srh(struct rte_mbuf *m, struct ip6_info *ip6_info) {
 	ip6_info->ext_offset = sizeof(*ip6);
 	ip6_info->sr = NULL;
 	ip6_info->sr_len = 0;
+	ip6_info->err_offset = 0;
 
 	if (find_srh(m, ip6_info) < 0)
 		return -1;
 
 	if (ip6_info->sr) {
 		struct rte_ipv6_routing_ext *sr = ip6_info->sr;
+		uint16_t sr_offset = (uint8_t *)sr - (uint8_t *)ip6;
 
+		// RFC 8754 section 4.1: find_srh() only reports type 4 headers.
 		// hdr_len is in 8B units (excl. first 8B)
 		// -> ext_len = 8 * (hdr_len + 1)
 		// each segment is 16B = 2x8B
 		// -> nsegs = hdr_len/2
-		// -> last_entry < hdr_len/2
-		if ((size_t)((sr->hdr_len + 1) << 3) != ip6_info->sr_len
-		    || sr->last_entry > sr->hdr_len / 2 - 1
-		    || sr->segments_left > sr->last_entry + 1
-		    || sr->type != RTE_IPV6_SRCRT_TYPE_4) {
-			// XXX send icmp parameter problem
+		// -> at least one segment, last_entry < hdr_len/2
+		if (sr->hdr_len < 2) {
+			ip6_info->err_offset = sr_offset
+				+ offsetof(struct rte_ipv6_routing_ext, hdr_len);
+			return -1;
+		}
+		if (sr->last_entry > sr->hdr_len / 2 - 1) {
+			ip6_info->err_offset = sr_offset
+				+ offsetof(struct rte_ipv6_routing_ext, last_entry);
+			return -1;
+		}
+		if (sr->segments_left > sr->last_entry + 1) {
+			ip6_info->err_offset = sr_offset
+				+ offsetof(struct rte_ipv6_routing_ext, segments_left);
 			return -1;
 		}
 	}
@@ -797,6 +833,93 @@ static void srv6_parse_ipv6_hop_srv6_dop(void **) {
 	assert_ip6_info_equal(&info, &expect);
 }
 
+// An SRH whose advertised length overruns the packet must be rejected, and
+// the failing offset recorded for the ICMPv6 Parameter Problem.
+static void srv6_parse_srh_truncated(void **) {
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+
+	// keep only half of the SRH
+	fm.mbuf.data_len = sizeof(struct rte_ipv6_hdr) + 12;
+	fm.mbuf.pkt_len = fm.mbuf.data_len;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
+	assert_int_equal(info.err_offset, sizeof(struct rte_ipv6_hdr));
+}
+
+// A routing header with an unknown type is rejected when it must be
+// processed (RFC 8200 section 4.4).
+static void srv6_parse_routing_unknown_type_transit(void **) {
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	expect.sr->type = 0;
+	expect.sr->segments_left = 1;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
+	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 2);
+}
+
+// ... but it is ignored when Segments Left is zero (RFC 8200 section 4.4).
+static void srv6_parse_routing_unknown_type_ignored(void **) {
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	expect.sr->type = 0;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_null(info.sr);
+	assert_int_equal(info.proto, IPPROTO_NONE);
+	assert_int_equal(info.ext_offset, expect.ext_offset);
+	assert_int_equal(info.err_offset, 0);
+}
+
+// An SRH without any segment cannot be processed (no SID to decap to).
+static void srv6_parse_srh_no_segment(void **) {
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	expect.sr->hdr_len = 0;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
+	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 1);
+}
+
+// last_entry must index an existing segment.
+static void srv6_parse_srh_bad_last_entry(void **) {
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	expect.sr->last_entry = 1;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
+	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 4);
+}
+
+// segments_left cannot exceed the number of segments.
+static void srv6_parse_srh_bad_segments_left(void **) {
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	expect.sr->segments_left = 2;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
+	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 3);
+}
+
 // End.DT4 with the inner packet sitting behind a destination options header.
 static void srv6_decap_dt4_behind_dop(void **) {
 	struct nexthop_info_srv6_local sr_d = {
@@ -997,6 +1120,12 @@ int main(void) {
 		cmocka_unit_test(srv6_parse_ipv6_hop_srv6),
 		cmocka_unit_test(srv6_parse_ipv6_srv6_dop),
 		cmocka_unit_test(srv6_parse_ipv6_hop_srv6_dop),
+		cmocka_unit_test(srv6_parse_srh_truncated),
+		cmocka_unit_test(srv6_parse_routing_unknown_type_transit),
+		cmocka_unit_test(srv6_parse_routing_unknown_type_ignored),
+		cmocka_unit_test(srv6_parse_srh_no_segment),
+		cmocka_unit_test(srv6_parse_srh_bad_last_entry),
+		cmocka_unit_test(srv6_parse_srh_bad_segments_left),
 		cmocka_unit_test(srv6_decap_payload_len_underflow),
 		cmocka_unit_test(srv6_decap_dt4_behind_dop),
 		cmocka_unit_test(srv6_end_x_usd_inner_ipv4),
