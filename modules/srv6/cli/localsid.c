@@ -28,6 +28,16 @@ static struct {
 	{SR_BEHAVIOR_END_DT46, "end.dt46"},
 };
 
+static const struct {
+	gr_srv6_flags_t flag;
+	const char *name;
+} flavors[] = {
+	{GR_SR_FL_FLAVOR_PSP, "psp"},
+	{GR_SR_FL_FLAVOR_USP, "usp"},
+	{GR_SR_FL_FLAVOR_USD, "usd"},
+	{GR_SR_FL_FLAVOR_NEXT_CSID, "next-csid"},
+};
+
 static int str_to_behavior(const char *str, gr_srv6_behavior_t *behavior) {
 	for (unsigned i = 0; i < ARRAY_DIM(behaviors); i++) {
 		if (strcmp(str, behaviors[i].name) == 0) {
@@ -72,12 +82,9 @@ static cmd_status_t srv6_localsid_add(struct gr_api_client *c, const struct ec_p
 		v = ec_pnode_get_strvec(n);
 		for (i = 0; i < ec_strvec_len(v); i++) {
 			str = ec_strvec_val(v, i);
-			if (!strcmp(str, "psp"))
-				sr6->flags |= GR_SR_FL_FLAVOR_PSP;
-			if (!strcmp(str, "usd"))
-				sr6->flags |= GR_SR_FL_FLAVOR_USD;
-			if (!strcmp(str, "next-csid"))
-				sr6->flags |= GR_SR_FL_FLAVOR_NEXT_CSID;
+			for (unsigned f = 0; f < ARRAY_DIM(flavors); f++)
+				if (!strcmp(str, flavors[f].name))
+					sr6->flags |= flavors[f].flag;
 		}
 	}
 
@@ -115,21 +122,14 @@ out:
 
 static void srv6_local_format_flavors(char *buf, size_t len, gr_srv6_flags_t flags) {
 	ssize_t n = 0;
+
 	buf[0] = 0;
-	if (flags & GR_SR_FL_FLAVOR_PSP) {
+	for (unsigned i = 0; i < ARRAY_DIM(flavors); i++) {
+		if (!(flags & flavors[i].flag))
+			continue;
 		if (n > 0)
 			SAFE_BUF(snprintf, len, " ");
-		SAFE_BUF(snprintf, len, "psp");
-	}
-	if (flags & GR_SR_FL_FLAVOR_USD) {
-		if (n > 0)
-			SAFE_BUF(snprintf, len, " ");
-		SAFE_BUF(snprintf, len, "usd");
-	}
-	if (flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
-		if (n > 0)
-			SAFE_BUF(snprintf, len, " ");
-		SAFE_BUF(snprintf, len, "next-csid");
+		SAFE_BUF(snprintf, len, "%s", flavors[i].name);
 	}
 err:
 	return;
@@ -196,8 +196,9 @@ static int ctx_init(struct ec_node *root) {
 
 	flavor_node = EC_NODE_CMD(
 		"FLAVORS",
-		"(psp,usd,next-csid)",
+		"(psp,usp,usd,next-csid)",
 		with_help("Penultimate Segment Pop of the SRH", ec_node_str("psp", "psp")),
+		with_help("Ultimate Segment Pop of the SRH", ec_node_str("usp", "usp")),
 		with_help("Ultimate Segment Decapsulation of the SRH", ec_node_str("usd", "usd")),
 		with_help("NEXT-CSID uSID flavor (RFC 9800)", ec_node_str("next-csid", "next-csid"))
 	);
