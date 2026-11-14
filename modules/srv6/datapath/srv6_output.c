@@ -34,6 +34,10 @@ enum {
 	EDGE_COUNT,
 };
 
+// RFC 2473 section 5.1: the Hop Limit of the outer header is configurable,
+// 64 is the common default (and what the Linux seg6 encapsulation uses).
+#define SR6_ENCAP_HOP_LIMIT 64
+
 // Scratch slot for the (rare) case of a worker lcore id beyond the
 // snapshot slot count (a worker created after the nexthop was
 // imported): validated like a real slot, against the snapshot it was
@@ -204,12 +208,17 @@ srv6_output_process(struct rte_graph *graph, struct rte_node *node, void **objs,
 				src = &nexthop_info_l3(src_nh)->ipv6;
 				tpl->iface_id = underlay->iface_id;
 			}
-			// The family-dependent byte is patched per packet: with an
-			// SRH it is the SRH next header and the outer protocol
-			// below is left as is; without one the per-packet patch
-			// overwrites it with the inner family.
-			ip6_set_fields(outer_ip6, 0, 0, src, &cache->seglist[0]);
+			// The template only carries the fields that are stable
+			// across packets: the Traffic Class, Flow Label and
+			// payload length are patched below. The family-dependent
+			// byte is patched per packet too: with an SRH it is the
+			// SRH next header and the outer protocol is left as is;
+			// without one the per-packet patch overwrites it with the
+			// inner family.
 			outer_ip6->proto = IPPROTO_ROUTING;
+			outer_ip6->hop_limits = SR6_ENCAP_HOP_LIMIT;
+			outer_ip6->src_addr = *src;
+			outer_ip6->dst_addr = cache->seglist[0];
 			tpl->gen = gen;
 		}
 
