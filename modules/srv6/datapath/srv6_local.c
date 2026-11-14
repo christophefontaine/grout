@@ -543,6 +543,7 @@ srv6_local_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 	struct ip6_info ip6_info;
 	struct rte_mbuf *m;
 	rte_edge_t edge;
+	uint32_t len;
 	int ret;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
@@ -562,7 +563,17 @@ srv6_local_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 			t->segleft = ip6_info.sr ? ip6_info.sr->segments_left : 0;
 		}
 
+		len = rte_pktmbuf_pkt_len(m);
 		edge = srv6_local_process_pkt(m, sr_d, &ip6_info);
+
+		// RFC 8986 section 6: count the packets successfully processed
+		// by this SID. IP_INPUT to IP6_LOCAL are the edges that accept
+		// the packet, handing it over to the forwarding or local
+		// delivery path. The counters are shared between worker threads.
+		if (edge <= IP6_LOCAL) {
+			__atomic_fetch_add(&sr_d->base.stats.packets, 1, __ATOMIC_RELAXED);
+			__atomic_fetch_add(&sr_d->base.stats.bytes, len, __ATOMIC_RELAXED);
+		}
 
 next:
 		rte_node_enqueue_x1(graph, node, edge, m);
