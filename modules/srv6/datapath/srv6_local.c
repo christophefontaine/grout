@@ -432,6 +432,12 @@ static int process_behav_end(
 	struct rte_ipv6_routing_ext *sr = ip6_info->sr;
 	struct eth_input_mbuf_data *id;
 
+	// RFC 8986 section 4.3, S15.1: an End.T SID associates the packet with
+	// its own FIB table. This applies to the transit path but also to the
+	// packets that the SID delivers locally, so do it before anything else.
+	if (!set_out_vrf_iface(m, sr_d))
+		return DEST_UNREACH;
+
 	// NEXT-CSID processing (RFC 9800)
 	if (sr_d->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
 		struct rte_ipv6_hdr *ip6 = ip6_info->ip6_hdr;
@@ -474,9 +480,6 @@ static int process_behav_end(
 	}
 
 forward:
-	if (!set_out_vrf_iface(m, sr_d))
-		return DEST_UNREACH;
-
 	// END.X: set explicit nexthop and go directly to ip6_forward (bypass FIB lookup)
 	if (sr_d->behavior == SR_BEHAVIOR_END_X) {
 		if (sr_d->l3_nh == NULL)
@@ -1018,6 +1021,44 @@ static void srv6_end_dt4_transit(void **) {
 	);
 }
 
+// RFC 8986 section 4.3, S15.1: an End.T SID associates the packet with its own
+// FIB table, including when the packet is delivered to a local upper layer.
+static void srv6_end_t_local_delivery_vrf(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END_T, .out_vrf_id = 3},
+	};
+	struct iface vrf_iface = {.id = 3, .vrf_id = 3};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_ICMPV6;
+
+	will_return_ptr(get_vrf_iface, &vrf_iface);
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), IP6_LOCAL);
+	assert_ptr_equal(mbuf_data(&fm.mbuf)->iface, &vrf_iface);
+}
+
+// An End.T SID whose table does not exist must not fall back to the ingress
+// VRF, which would deliver the packet in the wrong routing domain.
+static void srv6_end_t_local_delivery_no_vrf(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END_T, .out_vrf_id = 3},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_ICMPV6;
+
+	will_return_ptr(get_vrf_iface, NULL);
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), DEST_UNREACH);
+}
+
 // End.DT4 with the inner packet sitting behind a destination options header.
 static void srv6_decap_dt4_behind_dop(void **) {
 	struct nexthop_info_srv6_local sr_d = {
@@ -1308,6 +1349,8 @@ int main(void) {
 		cmocka_unit_test(srv6_end_not_allowed_upper),
 		cmocka_unit_test(srv6_end_dt6_unexpected_upper),
 		cmocka_unit_test(srv6_end_dt4_transit),
+		cmocka_unit_test(srv6_end_t_local_delivery_vrf),
+		cmocka_unit_test(srv6_end_t_local_delivery_no_vrf),
 		cmocka_unit_test(srv6_decap_dt4_behind_dop),
 		cmocka_unit_test(srv6_end_x_usd_inner_ipv4),
 		cmocka_unit_test(srv6_end_x_usd_inner_ipv6),
