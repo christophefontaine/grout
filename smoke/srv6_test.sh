@@ -354,3 +354,51 @@ grep -q "mtu = $tunnel_mtu" $ping_out || {
 }
 
 grcli interface set port p1 mtu 1500
+
+#
+# RFC 8754 section 4.3.2: a packet whose destination is a plain local address
+# (not an SRv6 SID) cannot be routed by its SRH. When segments are left, grout
+# must answer with an ICMPv6 Parameter Problem, Code 0, instead of delivering
+# the payload as if the routing had happened.
+#
+
+capture=$tmp/local_srh
+ip netns exec n1 timeout 5 tcpdump -c1 -pnnli x-p1 \
+	'icmp6 and ip6[40] = 4 and ip6[41] = 0' >"$capture" 2>&1 &
+tcpdump_pid=$!
+for _ in $(seq 50); do
+	if grep -q "listening on" "$capture"; then
+		break
+	fi
+	sleep 0.1
+done
+
+# Hand-build the frame: the kernel refuses to send an SRv6 packet whose outer
+# destination is not an SRv6 SID.
+p1_mac=$(grcli -j interface show name p1 | jq -r .mac)
+ip netns exec n1 python3 - x-p1 "$p1_mac" <<'EOF'
+import socket, struct, sys
+
+dev, mac = sys.argv[1], bytes(int(b, 16) for b in sys.argv[2].split(":"))
+
+ip6_src = socket.inet_pton(socket.AF_INET6, "fd00:102::2")
+ip6_dst = socket.inet_pton(socket.AF_INET6, "fd00:102::1")
+segments = [ip6_dst, socket.inet_pton(socket.AF_INET6, "fd00:202:200::")]
+
+# SRH: next header ICMPv6, two segments (40 bytes, hdr_ext_len 4), routing
+# type 4, one segment left.
+srh = struct.pack("!BBBB", 58, 4, 4, 1)
+srh += struct.pack("!BBH", 1, 0, 0) + b"".join(segments)
+icmp = struct.pack("!BBH", 128, 0, 0) + b"\x00" * 8
+payload = srh + icmp
+ip6 = struct.pack("!IHBB", 6 << 28, len(payload), 43, 64) + ip6_src + ip6_dst
+
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+s.bind((dev, 0))
+s.send(mac + b"\x02\x00\x00\x00\x00\x01" + b"\x86\xdd" + ip6 + payload)
+EOF
+
+if ! wait $tcpdump_pid; then
+	cat "$capture"
+	fail "no ICMPv6 Parameter Problem for an SRH on a plain local address"
+fi

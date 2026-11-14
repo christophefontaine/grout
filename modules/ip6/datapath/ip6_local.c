@@ -16,6 +16,7 @@ enum {
 	BAD_CHECKSUM,
 	BAD_LENGTH,
 	ERROR,
+	PARAM_PROBLEM,
 	EDGE_COUNT,
 };
 static rte_edge_t edges[UINT_NUM_VALUES(uint8_t)] = {UNKNOWN_PROTO};
@@ -67,14 +68,42 @@ static uint16_t ip6_input_local_process(
 		while ((edge = edges[d->proto]) == UNKNOWN_PROTO) {
 			size_t ext_size = 0;
 			const uint8_t *ext;
-			uint8_t _ext[2];
+			uint8_t _ext[8];
 			int next_proto;
 
+			// Every extension header has a fixed part of at least 8
+			// bytes. The Routing Type is needed before the header
+			// length can be computed, so read the whole fixed part.
+			if (d->len < sizeof(_ext)) {
+				edge = BAD_LENGTH;
+				goto next;
+			}
 			ext = rte_pktmbuf_read(m, d->ext_offset, sizeof(_ext), _ext);
 			if (ext == NULL) {
 				edge = ERROR;
 				goto next;
 			}
+
+			// RFC 8754 section 4.3.2: this node is the destination
+			// address but not an SRv6 SID, so it cannot process a
+			// segment list. RFC 8200 section 4.4: ignore a
+			// completed routing header, but reject a packet that
+			// still has segments to visit instead of handing its
+			// payload to the upper layer as if the routing had
+			// been performed.
+			if (d->proto == IPPROTO_ROUTING) {
+				const struct rte_ipv6_routing_ext *sr;
+				uint16_t type_off;
+
+				sr = (const struct rte_ipv6_routing_ext *)ext;
+				type_off = offsetof(struct rte_ipv6_routing_ext, type);
+				if (sr->segments_left != 0) {
+					d->ext_offset += type_off;
+					edge = PARAM_PROBLEM;
+					goto next;
+				}
+			}
+
 			next_proto = rte_ipv6_get_next_ext(ext, d->proto, &ext_size);
 			if (next_proto < 0)
 				break; // end of extension headers
@@ -147,6 +176,7 @@ static struct rte_node_register input_node = {
 		[BAD_CHECKSUM] = "ip6_input_local_bad_checksum",
 		[BAD_LENGTH] = "ip6_input_local_bad_length",
 		[ERROR] = "ip6_input_local_error",
+		[PARAM_PROBLEM] = "ip6_error_param_problem",
 	},
 };
 
@@ -299,6 +329,48 @@ static void ip6_local_sets_packet_type(void **) {
 	assert_int_equal(fm.mbuf.packet_type, RTE_PTYPE_L3_IPV6);
 }
 
+// A routing header that still has segments to visit cannot be processed by a
+// node that is not an SRv6 SID: RFC 8754 section 4.3.2 and RFC 8200 section 4.4
+// require a Parameter Problem pointing at the Routing Type.
+static void ip6_local_srh_segments_left(void **) {
+	struct fake_mbuf fm;
+	struct rte_ipv6_routing_ext *srh;
+	void *obj = &fm.mbuf;
+
+	fake_mbuf_init(&fm);
+	fm.ipv6_hdr.proto = IPPROTO_ROUTING;
+	srh = (struct rte_ipv6_routing_ext *)fm.payload;
+	memset(srh, 0, sizeof(*srh));
+	srh->next_hdr = IPPROTO_NONE;
+	srh->type = RTE_IPV6_SRCRT_TYPE_4;
+	srh->segments_left = 1;
+
+	expect_uint_value(rte_node_enqueue_x1, next, PARAM_PROBLEM);
+	ip6_input_local_process(NULL, NULL, &obj, 1);
+
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset,
+		sizeof(fm.ipv6_hdr) + offsetof(struct rte_ipv6_routing_ext, type)
+	);
+}
+
+// A routing header with no segment left is ignored and the payload is
+// delivered as usual, whatever the routing type.
+static void ip6_local_routing_no_segments_left(void **) {
+	struct fake_mbuf fm;
+	struct rte_ipv6_routing_ext *srh;
+	void *obj = &fm.mbuf;
+
+	fake_mbuf_init(&fm);
+	fm.ipv6_hdr.proto = IPPROTO_ROUTING;
+	srh = (struct rte_ipv6_routing_ext *)fm.payload;
+	memset(srh, 0, sizeof(*srh));
+	srh->next_hdr = TEST_PROTO;
+
+	expect_uint_value(rte_node_enqueue_x1, next, TEST_EDGE);
+	ip6_input_local_process(NULL, NULL, &obj, 1);
+}
+
 int main(void) {
 	const struct CMUnitTest tests[] = {
 		cmocka_unit_test_setup(ip6_local_payload_len_beyond_mbuf, setup),
@@ -307,6 +379,8 @@ int main(void) {
 		cmocka_unit_test_setup(ip6_local_payload_len_below_mbuf, setup),
 		cmocka_unit_test_setup(ip6_local_valid_length, setup),
 		cmocka_unit_test_setup(ip6_local_sets_packet_type, setup),
+		cmocka_unit_test_setup(ip6_local_srh_segments_left, setup),
+		cmocka_unit_test_setup(ip6_local_routing_no_segments_left, setup),
 	};
 
 	return cmocka_run_group_tests(tests, NULL, NULL);
