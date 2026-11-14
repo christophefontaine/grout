@@ -19,7 +19,15 @@ GR_MBUF_PRIV_DATA_TYPE(ip6_local_mbuf_data, {
 	struct rte_ipv6_addr src;
 	struct rte_ipv6_addr dst;
 	uint16_t len;
-	uint16_t ext_offset;
+	// Error argument carried from the node that detected the error to the
+	// ICMPv6 error node. Which member is valid depends on the error:
+	//   - ext_offset: offset of the erroneous field, for a Parameter Problem;
+	//   - mtu: MTU to advertise, for a Packet Too Big.
+	// A node must fill the member its error node reads, and only that one.
+	union {
+		uint16_t ext_offset;
+		uint16_t mtu;
+	};
 	uint8_t hop_limit;
 	uint8_t proto;
 });

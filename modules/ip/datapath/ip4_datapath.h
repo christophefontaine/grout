@@ -23,6 +23,8 @@ GR_MBUF_PRIV_DATA_TYPE(ip_local_mbuf_data, {
 	uint16_t vrf_id;
 	uint8_t proto;
 	uint8_t ttl;
+	// MTU to advertise in an ICMP Fragmentation Needed error.
+	uint16_t mtu;
 });
 
 void ip_input_register_nexthop_type(gr_nh_type_t type, const char *next_node);

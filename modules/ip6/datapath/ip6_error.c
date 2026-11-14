@@ -29,6 +29,7 @@ ip6_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 	struct icmp6_err_param_problem *pp;
 	struct icmp6_err_dest_unreach *du;
 	struct icmp6_err_ttl_exceeded *te;
+	struct icmp6_err_pkt_too_big *ptb;
 	const struct nexthop_info_l3 *l3;
 	struct ip6_local_mbuf_data *d;
 	const struct iface *iface;
@@ -62,6 +63,18 @@ ip6_error_process(struct rte_graph *graph, struct rte_node *node, void **objs, u
 				edge = NO_HEADROOM;
 				goto next;
 			}
+			break;
+		case ICMP6_ERR_PKT_TOO_BIG:
+			ptb = gr_mbuf_prepend(mbuf, ptb);
+			if (unlikely(ptb == NULL)) {
+				edge = NO_HEADROOM;
+				goto next;
+			}
+			// RFC 8200 section 4.4: the MTU of the link that is
+			// too small, as computed by the node that dropped the
+			// packet. For a tunnel this is the tunnel MTU (RFC
+			// 2473 section 7.1).
+			ptb->mtu = rte_cpu_to_be_32(ip6_local_mbuf_data(mbuf)->mtu);
 			break;
 		case ICMP6_ERR_TTL_EXCEEDED:
 			te = gr_mbuf_prepend(mbuf, te);
@@ -144,6 +157,8 @@ next:
 
 IP6_ERROR_NODE(dest_unreach, ICMP6_ERR_DEST_UNREACH, 0)
 IP6_ERROR_NODE(ttl_exceeded, ICMP6_ERR_TTL_EXCEEDED, 0)
+// RFC 4443 section 3.2: Packet Too Big.
+IP6_ERROR_NODE(pkt_too_big, ICMP6_ERR_PKT_TOO_BIG, 0)
 // RFC 8200 section 4.4: erroneous header field.
 IP6_ERROR_NODE(param_problem, ICMP6_ERR_PARAM_PROBLEM, 0)
 // RFC 8754 section 4.3: SR Upper-layer Header Error.

@@ -289,3 +289,40 @@ if ! wait $tcpdump_pid; then
 fi
 wait $tcpdump_any_pid || true
 wait $ping_pid || fail "uSID container encapsulation did not forward"
+
+#
+# Underlay MTU test
+#
+# The encapsulated packet must fit in the underlay MTU. When it does not,
+# grout must report the tunnel MTU to the source of the inner packet instead
+# of silently dropping it: an ICMPv6 Packet Too Big for an IPv6 payload, an
+# ICMPv4 Fragmentation Needed for an IPv4 one (RFC 2473 sections 7.1 and 7.2).
+#
+
+# h.encaps.red with a single segment leaves no SRH: the outer header is 40
+# bytes, so the advertised tunnel MTU is the underlay MTU minus 40.
+grcli nexthop add srv6 seglist fd00:202:200:: encap h.encaps.red id 48
+grcli route add 192.168.0.0/16 via id 48
+grcli route add fd00:60::/64 via id 48
+
+underlay_mtu=1400
+tunnel_mtu=$((underlay_mtu - 40))
+grcli interface set port p1 mtu $underlay_mtu
+
+ping_out=$tmp/mtu_v6
+ip netns exec n0 ping6 -c1 -W1 -s 1400 -n fd00:60::1 >$ping_out 2>&1 \
+	&& fail "an oversize IPv6 packet was not rejected"
+grep -q "mtu=$tunnel_mtu" $ping_out || {
+	cat $ping_out
+	fail "no ICMPv6 Packet Too Big advertising the tunnel MTU"
+}
+
+ping_out=$tmp/mtu_v4
+ip netns exec n0 ping -c1 -W1 -s 1400 -M do -n 192.168.60.1 >$ping_out 2>&1 \
+	&& fail "an oversize IPv4 packet was not rejected"
+grep -q "mtu = $tunnel_mtu" $ping_out || {
+	cat $ping_out
+	fail "no ICMPv4 Fragmentation Needed advertising the tunnel MTU"
+}
+
+grcli interface set port p1 mtu 1500
