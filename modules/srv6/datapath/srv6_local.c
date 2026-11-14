@@ -545,6 +545,12 @@ static inline bool is_param_problem(rte_edge_t edge) {
 		|| edge == NOT_ALLOWED_UPPER;
 }
 
+// Edges where the packet was accepted by the SID and handed over to the
+// forwarding or local delivery path.
+static inline bool is_accepted(rte_edge_t edge) {
+	return edge == IP_INPUT || edge == IP6_INPUT || edge == IP6_FORWARD || edge == IP6_LOCAL;
+}
+
 // called from 'ip6_input' node
 static uint16_t
 srv6_local_process(struct rte_graph *graph, struct rte_node *node, void **objs, uint16_t nb_objs) {
@@ -552,6 +558,7 @@ srv6_local_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 	struct ip6_info ip6_info;
 	struct rte_mbuf *m;
 	rte_edge_t edge;
+	uint32_t len;
 	int ret;
 
 	for (uint16_t i = 0; i < nb_objs; i++) {
@@ -571,7 +578,15 @@ srv6_local_process(struct rte_graph *graph, struct rte_node *node, void **objs, 
 			t->segleft = ip6_info.sr ? ip6_info.sr->segments_left : 0;
 		}
 
+		len = rte_pktmbuf_pkt_len(m);
 		edge = srv6_local_process_pkt(m, sr_d, &ip6_info);
+
+		// RFC 8986 section 6: count the packets successfully processed
+		// by this SID. The counters are shared between worker threads.
+		if (is_accepted(edge)) {
+			__atomic_fetch_add(&sr_d->base.stats.packets, 1, __ATOMIC_RELAXED);
+			__atomic_fetch_add(&sr_d->base.stats.bytes, len, __ATOMIC_RELAXED);
+		}
 
 next:
 		if (is_param_problem(edge))

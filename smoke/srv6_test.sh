@@ -77,6 +77,12 @@ ping -i0.01 -c3 -n 192.168.60.1 || fail "ping through an SRv6 nexthop failed"
 # check that sid is reachable
 ip netns exec n1 ping6 -i0.01 -c3 -n fd00:202:100::
 
+# RFC 8986 section 6: the SID counts the packets it successfully processed.
+grcli -j nexthop show id 666 | jq -e '.packets > 0' >/dev/null \
+	|| fail "the End.DT4 SID did not count the packets it processed"
+grcli -j nexthop show id 666 | jq -e '.bytes > 0' >/dev/null \
+	|| fail "the End.DT4 SID did not count the bytes it processed"
+
 #
 # NEXT-CSID transit test
 #

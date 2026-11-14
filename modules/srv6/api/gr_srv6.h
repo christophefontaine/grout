@@ -98,6 +98,13 @@ typedef enum : uint8_t {
 	GR_SR_FL_FLAVOR_USP = GR_BIT8(3), // Ultimate Segment Pop of the SRH.
 } gr_srv6_flags_t;
 
+// Per-SID counters. The daemon increments them on every packet it accepts
+// for the SID; clients must ignore them in requests.
+struct gr_srv6_sid_stats {
+	uint64_t packets;
+	uint64_t bytes;
+};
+
 // SRv6 local nexthop information for Local SID processing.
 // Used with GR_NH_T_SR6_LOCAL nexthops via GR_NH_ADD from gr_infra.h.
 struct gr_nexthop_info_srv6_local {
@@ -107,4 +114,5 @@ struct gr_nexthop_info_srv6_local {
 	uint8_t block_bits; // Locator-block length in bits (default 32).
 	uint8_t csid_bits; // Compressed SID length in bits (default 16).
 	struct rte_ipv6_addr endx_addr; // END_X: L3 nexthop address (on base iface).
+	struct gr_srv6_sid_stats stats; // Read-only, filled by the daemon.
 };

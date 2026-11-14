@@ -149,6 +149,8 @@ static void add_columns_srv6_local(struct gr_table *table) {
 	gr_table_column(table, "BLOCK_BITS", GR_DISP_LEFT | GR_DISP_INT);
 	gr_table_column(table, "CSID_BITS", GR_DISP_LEFT | GR_DISP_INT);
 	gr_table_column(table, "OUT_VRF", GR_DISP_LEFT);
+	gr_table_column(table, "PACKETS", GR_DISP_RIGHT | GR_DISP_INT);
+	gr_table_column(table, "BYTES", GR_DISP_RIGHT | GR_DISP_INT);
 }
 
 static void fill_table_srv6_local(struct gr_table *table, unsigned start_col, const void *info) {
@@ -169,6 +171,8 @@ static void fill_table_srv6_local(struct gr_table *table, unsigned start_col, co
 	}
 	if (sr6->out_vrf_id != GR_VRF_ID_UNDEF)
 		gr_table_cell(table, start_col + 5, "%d", sr6->out_vrf_id);
+	gr_table_cell(table, start_col + 6, "%lu", sr6->stats.packets);
+	gr_table_cell(table, start_col + 7, "%lu", sr6->stats.bytes);
 }
 
 static void fill_object_srv6_local(struct gr_object *o, const void *info) {
@@ -187,6 +191,8 @@ static void fill_object_srv6_local(struct gr_object *o, const void *info) {
 	}
 	if (sr6->out_vrf_id != GR_VRF_ID_UNDEF)
 		gr_object_field(o, "out_vrf", GR_DISP_INT, "%d", sr6->out_vrf_id);
+	gr_object_field(o, "packets", GR_DISP_INT, "%lu", sr6->stats.packets);
+	gr_object_field(o, "bytes", GR_DISP_INT, "%lu", sr6->stats.bytes);
 }
 
 static struct cli_nexthop_formatter srv6_local_formatter = {

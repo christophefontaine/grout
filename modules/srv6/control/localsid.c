@@ -11,6 +11,8 @@
 
 #include <rte_hash.h>
 
+#include <string.h>
+
 LOG_TYPE("srv6");
 
 static struct rte_hash *srv6_local_hash;
@@ -27,7 +29,17 @@ static inline void set_srv6_local_key(
 	uint16_t iface_id,
 	const struct gr_nexthop_info_srv6_local *info
 ) {
-	key->base = *info;
+	// Copy the configuration fields one by one: a plain struct assignment
+	// would also copy the padding introduced by the counter alignment,
+	// which is not guaranteed to be identical on both sides of the hash
+	// lookup. The counters are not part of the SID identity either.
+	memset(key, 0, sizeof(*key));
+	key->base.out_vrf_id = info->out_vrf_id;
+	key->base.behavior = info->behavior;
+	key->base.flags = info->flags;
+	key->base.block_bits = info->block_bits;
+	key->base.csid_bits = info->csid_bits;
+	key->base.endx_addr = info->endx_addr;
 	key->iface_id = iface_id;
 }
 
@@ -174,7 +186,9 @@ static int srv6_local_nh_import_info(struct nexthop *nh, const void *info) {
 	if (memcmp(&old_key, &key, sizeof(old_key)) != 0)
 		rte_hash_del_key(srv6_local_hash, &old_key);
 
-	// Update fields once everything is correct
+	// Update fields once everything is correct. Re-adding an existing SID
+	// must not reset its counters.
+	pub.stats = priv->base.stats;
 	priv->base = pub;
 	if (l3_nh != old_l3_nh) {
 		if (l3_nh != NULL && !l3_nh_created)
