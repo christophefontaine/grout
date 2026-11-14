@@ -44,8 +44,6 @@ struct ip6_info {
 	uint8_t *sr_prev_nh;
 	struct rte_ipv6_hdr *ip6_hdr;
 	struct rte_ipv6_routing_ext *sr;
-	// Offset of the field that failed parsing, for ICMP Parameter Problem.
-	uint16_t err_offset;
 };
 
 static const uint8_t is_ipv6_ext[256] = {
@@ -117,7 +115,7 @@ static int walk_ext_headers(struct rte_mbuf *m, struct ip6_info *ip6_info, bool 
 					field = offsetof(
 						struct rte_ipv6_routing_ext, segments_left
 					);
-				ip6_info->err_offset = ext_offset + field;
+				ip6_local_mbuf_data(m)->ext_offset = ext_offset + field;
 				return -1;
 			}
 		}
@@ -132,7 +130,7 @@ static int walk_ext_headers(struct rte_mbuf *m, struct ip6_info *ip6_info, bool 
 	return 0;
 
 truncated:
-	ip6_info->err_offset = ext_offset;
+	ip6_local_mbuf_data(m)->ext_offset = ext_offset;
 	return -1;
 }
 
@@ -150,7 +148,6 @@ static int ip6_parse_to_srh(struct rte_mbuf *m, struct ip6_info *ip6_info) {
 	ip6_info->ext_offset = sizeof(*ip6);
 	ip6_info->sr = NULL;
 	ip6_info->sr_len = 0;
-	ip6_info->err_offset = 0;
 
 	if (walk_ext_headers(m, ip6_info, true) < 0)
 		return -1;
@@ -162,8 +159,12 @@ static int ip6_parse_to_srh(struct rte_mbuf *m, struct ip6_info *ip6_info) {
 		// RFC 8200 section 4.5: the Payload Length must cover the
 		// headers it announces. decap_srv6() subtracts the SRH length
 		// from it and would wrap the 16 bit field around otherwise.
-		if (rte_be_to_cpu_16(ip6->payload_len) < ip6_info->sr_len)
+		if (rte_be_to_cpu_16(ip6->payload_len) < ip6_info->sr_len) {
+			ip6_local_mbuf_data(m)->ext_offset = offsetof(
+				struct rte_ipv6_hdr, payload_len
+			);
 			return -1;
+		}
 
 		// RFC 8754 section 4.1: walk_ext_headers() only reports type 4 headers.
 		// hdr_len is in 8B units (excl. first 8B)
@@ -172,17 +173,17 @@ static int ip6_parse_to_srh(struct rte_mbuf *m, struct ip6_info *ip6_info) {
 		// -> nsegs = hdr_len/2
 		// -> at least one segment, last_entry < hdr_len/2
 		if (sr->hdr_len < 2) {
-			ip6_info->err_offset = sr_offset
+			ip6_local_mbuf_data(m)->ext_offset = sr_offset
 				+ offsetof(struct rte_ipv6_routing_ext, hdr_len);
 			return -1;
 		}
 		if (sr->last_entry > sr->hdr_len / 2 - 1) {
-			ip6_info->err_offset = sr_offset
+			ip6_local_mbuf_data(m)->ext_offset = sr_offset
 				+ offsetof(struct rte_ipv6_routing_ext, last_entry);
 			return -1;
 		}
 		if (sr->segments_left > sr->last_entry + 1) {
-			ip6_info->err_offset = sr_offset
+			ip6_local_mbuf_data(m)->ext_offset = sr_offset
 				+ offsetof(struct rte_ipv6_routing_ext, segments_left);
 			return -1;
 		}
@@ -286,9 +287,12 @@ static int process_upper_layer(struct rte_mbuf *m, struct ip6_info *ip6_info) {
 	// useful for Operations, Administration, and Maintenance (OAM).  As an
 	// example, an operator might permit pinging of SIDs
 	// XXX: make allowed ULPs configurable (bitmap/flags).
-	if (ip6_info->proto != IPPROTO_ICMPV6)
-		// Optionally send ICMP Parameter Problem, Code 4, pointer = ip6_info->ext_offsets
+	if (ip6_info->proto != IPPROTO_ICMPV6) {
+		// RFC 8986 section 4.1.1, S04: SR Upper-layer Header Error,
+		// pointing at the upper layer header we refuse to process.
+		ip6_local_mbuf_data(m)->ext_offset = ip6_info->ext_offset;
 		return NOT_ALLOWED_UPPER;
+	}
 
 	assert(ip6_info->ip6_hdr != NULL);
 	return IP6_LOCAL;
@@ -307,8 +311,13 @@ static int process_behav_decap(
 	rte_edge_t edge;
 
 	// transit is not allowed
-	if (sr != NULL && sr->segments_left > 0)
+	if (sr != NULL && sr->segments_left > 0) {
+		// RFC 8986 section 4.4, S02-S03: erroneous header field,
+		// pointing at the Segments Left we refuse to process.
+		ip6_local_mbuf_data(m)->ext_offset = (uint8_t *)sr - (uint8_t *)ip6_info->ip6_hdr
+			+ offsetof(struct rte_ipv6_routing_ext, segments_left);
 		return NO_TRANSIT;
+	}
 
 	// ip6_parse_to_srh() stopped on the SRH, resolve the real upper layer
 	if (unlikely(walk_ext_headers(m, ip6_info, false) < 0))
@@ -316,14 +325,20 @@ static int process_behav_decap(
 
 	switch (ip6_info->proto) {
 	case IPPROTO_IPV6:
-		if (sr_d->behavior == SR_BEHAVIOR_END_DT4)
+		if (sr_d->behavior == SR_BEHAVIOR_END_DT4) {
+			// RFC 8986 section 4.1.1, S04: SR Upper-layer
+			// Header Error, pointing at the inner header.
+			ip6_local_mbuf_data(m)->ext_offset = ip6_info->ext_offset;
 			return UNEXPECTED_UPPER;
+		}
 		edge = IP6_INPUT;
 		break;
 
 	case IPPROTO_IPIP:
-		if (sr_d->behavior == SR_BEHAVIOR_END_DT6)
+		if (sr_d->behavior == SR_BEHAVIOR_END_DT6) {
+			ip6_local_mbuf_data(m)->ext_offset = ip6_info->ext_offset;
 			return UNEXPECTED_UPPER;
+		}
 		edge = IP_INPUT;
 		break;
 
@@ -555,10 +570,10 @@ static struct rte_node_register srv6_local_node = {
 		[IP6_INPUT] = "ip6_input",
 		[IP6_FORWARD] = "ip6_forward",
 		[IP6_LOCAL] = "ip6_input_local",
-		[INVALID_PACKET] = "sr6_local_invalid",
-		[UNEXPECTED_UPPER] = "sr6_local_unexpected_upper",
-		[NOT_ALLOWED_UPPER] = "sr6_local_not_allowed_upper",
-		[NO_TRANSIT] = "sr6_local_no_transit",
+		[INVALID_PACKET] = "ip6_error_param_problem",
+		[UNEXPECTED_UPPER] = "ip6_error_param_problem_ulp",
+		[NOT_ALLOWED_UPPER] = "ip6_error_param_problem_ulp",
+		[NO_TRANSIT] = "ip6_error_param_problem",
 		[DEST_UNREACH] = "ip6_error_dest_unreach",
 		[TTL_EXCEEDED] = "ip6_error_ttl_exceeded",
 	},
@@ -572,11 +587,6 @@ static struct gr_node_info srv6_local_info = {
 };
 
 GR_NODE_REGISTER(srv6_local_info);
-
-GR_DROP_REGISTER(sr6_local_invalid);
-GR_DROP_REGISTER(sr6_local_unexpected_upper);
-GR_DROP_REGISTER(sr6_local_not_allowed_upper);
-GR_DROP_REGISTER(sr6_local_no_transit);
 
 #ifdef __GROUT_UNIT_TEST__
 #include "_cmocka.h"
@@ -859,7 +869,7 @@ static void srv6_parse_srh_truncated(void **) {
 	fm.mbuf.pkt_len = fm.mbuf.data_len;
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
-	assert_int_equal(info.err_offset, sizeof(struct rte_ipv6_hdr));
+	assert_int_equal(ip6_local_mbuf_data(&fm.mbuf)->ext_offset, sizeof(struct rte_ipv6_hdr));
 }
 
 // A routing header with an unknown type is rejected when it must be
@@ -874,7 +884,9 @@ static void srv6_parse_routing_unknown_type_transit(void **) {
 	expect.sr->segments_left = 1;
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
-	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 2);
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 2
+	);
 }
 
 // ... but it is ignored when Segments Left is zero (RFC 8200 section 4.4).
@@ -890,7 +902,6 @@ static void srv6_parse_routing_unknown_type_ignored(void **) {
 	assert_null(info.sr);
 	assert_int_equal(info.proto, IPPROTO_NONE);
 	assert_int_equal(info.ext_offset, expect.ext_offset);
-	assert_int_equal(info.err_offset, 0);
 }
 
 // A second SRH that still has segments to visit is rejected by the walk to the
@@ -910,7 +921,9 @@ static void srv6_parse_second_srh_segments_left(void **) {
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
 	assert_int_equal(process_behav_decap(&fm.mbuf, &sr_d, &info), INVALID_PACKET);
-	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 3);
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 3
+	);
 }
 
 // An SRH without any segment cannot be processed (no SID to decap to).
@@ -923,7 +936,9 @@ static void srv6_parse_srh_no_segment(void **) {
 	expect.sr->hdr_len = 0;
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
-	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 1);
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 1
+	);
 }
 
 // last_entry must index an existing segment.
@@ -936,7 +951,9 @@ static void srv6_parse_srh_bad_last_entry(void **) {
 	expect.sr->last_entry = 1;
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
-	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 4);
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 4
+	);
 }
 
 // segments_left cannot exceed the number of segments.
@@ -949,7 +966,65 @@ static void srv6_parse_srh_bad_segments_left(void **) {
 	expect.sr->segments_left = 2;
 
 	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), -1);
-	assert_int_equal(info.err_offset, expect.ext_offset - expect.sr_len + 3);
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset - expect.sr_len + 3
+	);
+}
+
+// RFC 8986 section 4.1.1, S04: an upper layer that the SID refuses to process
+// is reported in an ICMPv6 Parameter Problem, Code 4, pointing at it.
+static void srv6_end_not_allowed_upper(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END, .out_vrf_id = GR_VRF_ID_UNDEF},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_TCP;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), NOT_ALLOWED_UPPER);
+	// the SRH was popped: the pointer is relative to the remaining header
+	assert_int_equal(ip6_local_mbuf_data(&fm.mbuf)->ext_offset, sizeof(struct rte_ipv6_hdr));
+}
+
+// An End.DT6 SID receiving an IPv4 packet reports the upper layer error too.
+static void srv6_end_dt6_unexpected_upper(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END_DT6, .out_vrf_id = GR_VRF_ID_UNDEF},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	push_inner_ipv4(&fm);
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_decap(&fm.mbuf, &sr_d, &info), UNEXPECTED_UPPER);
+	assert_int_equal(ip6_local_mbuf_data(&fm.mbuf)->ext_offset, expect.ext_offset);
+}
+
+// A decapsulation SID that is not the last segment reports its Segments Left.
+static void srv6_end_dt4_transit(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END_DT4, .out_vrf_id = GR_VRF_ID_UNDEF},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	expect.sr->segments_left = 1;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_decap(&fm.mbuf, &sr_d, &info), NO_TRANSIT);
+	assert_int_equal(
+		ip6_local_mbuf_data(&fm.mbuf)->ext_offset,
+		sizeof(struct rte_ipv6_hdr) + offsetof(struct rte_ipv6_routing_ext, segments_left)
+	);
 }
 
 // End.DT4 with the inner packet sitting behind a destination options header.
@@ -1239,6 +1314,9 @@ int main(void) {
 		cmocka_unit_test(srv6_parse_srh_bad_last_entry),
 		cmocka_unit_test(srv6_parse_srh_bad_segments_left),
 		cmocka_unit_test(srv6_parse_payload_len_underflow),
+		cmocka_unit_test(srv6_end_not_allowed_upper),
+		cmocka_unit_test(srv6_end_dt6_unexpected_upper),
+		cmocka_unit_test(srv6_end_dt4_transit),
 		cmocka_unit_test(srv6_decap_dt4_behind_dop),
 		cmocka_unit_test(srv6_end_x_usd_inner_ipv4),
 		cmocka_unit_test(srv6_end_x_usd_inner_ipv6),
