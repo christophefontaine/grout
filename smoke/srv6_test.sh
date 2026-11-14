@@ -84,6 +84,38 @@ grcli -j nexthop show id 666 | jq -e '.bytes > 0' >/dev/null \
 	|| fail "the End.DT4 SID did not count the bytes it processed"
 
 #
+# Upper-layer allow-list
+#
+# RFC 8986 section 4.1.1: a SID only terminates the upper-layer headers that
+# its local configuration allows, ICMPv6 by default.
+#
+grcli nexthop add srv6-local behavior end id 800
+grcli route add fd00:202:998::/48 via id 800
+ip netns exec n1 ping6 -i0.01 -c3 -n fd00:202:998:: \
+	|| fail "ICMPv6 echo to an End SID failed"
+
+# An explicit ICMPv6 allow-list is the default one.
+before=$(grcli -j nexthop show id 800)
+grcli nexthop add srv6-local behavior end ulp icmpv6 id 800 \
+	|| fail "re-adding an End SID with an explicit ICMPv6 allow-list failed"
+after=$(grcli -j nexthop show id 800)
+[ "$before" = "$after" ] || fail "the default allow-list should be ICMPv6 only"
+
+# The allow-list is part of the SID identity, regardless of the order the
+# protocols are given in.
+grcli nexthop add srv6-local behavior end ulp icmpv6 udp id 801
+grcli route add fd00:202:999::/48 via id 801
+before=$(grcli -j nexthop show id 801)
+grcli nexthop add srv6-local behavior end ulp udp icmpv6 id 801 \
+	|| fail "re-adding an End SID with the same allow-list failed"
+after=$(grcli -j nexthop show id 801)
+[ "$before" = "$after" ] || fail "the allow-list order changed the SID identity"
+grcli -j nexthop show id 801 | jq -e '.ulp == ["icmpv6","udp"]' >/dev/null \
+	|| fail "the SID does not report its upper-layer allow-list"
+ip netns exec n1 ping6 -i0.01 -c3 -n fd00:202:999:: \
+	|| fail "ICMPv6 echo to an End SID with an explicit allow-list failed"
+
+#
 # NEXT-CSID transit test
 #
 # A CSID container fd00:202:0300:0100:: packs two CSIDs (0300 and 0100)

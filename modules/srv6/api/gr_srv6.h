@@ -98,6 +98,33 @@ typedef enum : uint8_t {
 	GR_SR_FL_FLAVOR_USP = GR_BIT8(3), // Ultimate Segment Pop of the SRH.
 } gr_srv6_flags_t;
 
+// Upper-layer headers that a local SID terminates, as a bitmap: one bit per
+// IPv6 Next Header value (RFC 8200 section 4.7), so that any protocol can be
+// allowed without growing the structure.
+#define GR_SRV6_ULP_BITMAP_LEN 32
+
+// Default allow-list: ICMPv6 only. RFC 8986 section 4.1.1 recommends allowing
+// only the headers that do not make the SID forward the packet.
+#define GR_SRV6_ULP_DEFAULT_BITMAP {[IPPROTO_ICMPV6 / 8] = (1u << (IPPROTO_ICMPV6 % 8))}
+
+static inline void gr_srv6_ulp_allow(uint8_t bitmap[GR_SRV6_ULP_BITMAP_LEN], uint8_t proto) {
+	bitmap[proto / 8] |= (uint8_t)(1u << (proto % 8));
+}
+
+static inline bool
+gr_srv6_ulp_allowed(const uint8_t bitmap[GR_SRV6_ULP_BITMAP_LEN], uint8_t proto) {
+	return (bitmap[proto / 8] >> (proto % 8)) & 1;
+}
+
+// An all-zero bitmap means the SID was configured without an explicit
+// allow-list and gets the default one.
+static inline void gr_srv6_ulp_normalize(uint8_t bitmap[GR_SRV6_ULP_BITMAP_LEN]) {
+	for (unsigned i = 0; i < GR_SRV6_ULP_BITMAP_LEN; i++)
+		if (bitmap[i] != 0)
+			return;
+	gr_srv6_ulp_allow(bitmap, IPPROTO_ICMPV6);
+}
+
 // Per-SID counters. The daemon increments them on every packet it accepts
 // for the SID; clients must ignore them in requests.
 struct gr_srv6_sid_stats {
@@ -113,6 +140,11 @@ struct gr_nexthop_info_srv6_local {
 	gr_srv6_flags_t flags;
 	uint8_t block_bits; // Locator-block length in bits (default 32).
 	uint8_t csid_bits; // Compressed SID length in bits (default 16).
+	// Upper-layer headers delivered locally (default: ICMPv6 only). Used
+	// by every behavior that can receive a packet which is not the family
+	// it decapsulates, including the decapsulation ones (RFC 8986 section
+	// 4.1.1).
+	uint8_t ulp_bitmap[GR_SRV6_ULP_BITMAP_LEN];
 	struct rte_ipv6_addr endx_addr; // END_X: L3 nexthop address (on base iface).
 	struct gr_srv6_sid_stats stats; // Read-only, filled by the daemon.
 };
