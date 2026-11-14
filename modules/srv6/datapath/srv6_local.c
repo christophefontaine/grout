@@ -290,12 +290,10 @@ static int process_upper_layer(
 			return INVALID_PACKET;
 	}
 
-	// RFC 8996 : 4.1.1 Upper-Layer Header
-	// Allowing the processing of specific Upper-Layer header types is
-	// useful for Operations, Administration, and Maintenance (OAM).  As an
-	// example, an operator might permit pinging of SIDs
-	// XXX: make allowed ULPs configurable (bitmap/flags).
-	if (ip6_info->proto != IPPROTO_ICMPV6) {
+	// RFC 8986 section 4.1.1: only the upper-layer header types that the
+	// local configuration of this SID allows are processed locally. The
+	// default allow-list is ICMPv6 only.
+	if (!gr_srv6_ulp_allowed(sr_d->ulp_bitmap, ip6_info->proto)) {
 		// RFC 8986 section 4.1.1, S04: SR Upper-layer Header Error,
 		// pointing at the upper layer header we refuse to process.
 		ip6_local_mbuf_data(m)->ext_offset = ip6_info->ext_offset;
@@ -1008,6 +1006,7 @@ static void srv6_end_not_allowed_upper(void **) {
 			.behavior = SR_BEHAVIOR_END,
 			.out_vrf_id = GR_VRF_ID_UNDEF,
 			.flags = GR_SR_FL_FLAVOR_USP,
+			.ulp_bitmap = GR_SRV6_ULP_DEFAULT_BITMAP,
 		},
 	};
 	struct ip6_info info = {0}, expect;
@@ -1028,7 +1027,11 @@ static void srv6_end_not_allowed_upper(void **) {
 // pointer takes it into account.
 static void srv6_end_no_usp(void **) {
 	struct nexthop_info_srv6_local sr_d = {
-		.base = {.behavior = SR_BEHAVIOR_END, .out_vrf_id = GR_VRF_ID_UNDEF},
+		.base = {
+			.behavior = SR_BEHAVIOR_END,
+			.out_vrf_id = GR_VRF_ID_UNDEF,
+			.ulp_bitmap = GR_SRV6_ULP_DEFAULT_BITMAP,
+		},
 	};
 	struct ip6_info info = {0}, expect;
 	struct fake_mbuf fm;
@@ -1044,6 +1047,64 @@ static void srv6_end_no_usp(void **) {
 	assert_int_equal(fm.mbuf.data_len, data_len);
 	assert_non_null(info.sr);
 	assert_int_equal(ip6_local_mbuf_data(&fm.mbuf)->ext_offset, data_len);
+}
+
+// An upper layer listed in the SID allow-list is delivered to the local input
+// path instead of being answered with a Parameter Problem.
+static void srv6_end_ulp_allowed(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END, .out_vrf_id = GR_VRF_ID_UNDEF},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	gr_srv6_ulp_allow(sr_d.base.ulp_bitmap, IPPROTO_UDP);
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_UDP;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), IP6_LOCAL);
+}
+
+// The bitmap replaces the default: a SID that only allows UDP refuses the
+// ICMPv6 echo that the default allow-list accepts.
+static void srv6_end_ulp_without_icmpv6(void **) {
+	struct nexthop_info_srv6_local sr_d = {
+		.base = {.behavior = SR_BEHAVIOR_END, .out_vrf_id = GR_VRF_ID_UNDEF},
+	};
+	struct ip6_info info = {0}, expect;
+	struct fake_mbuf fm;
+
+	gr_srv6_ulp_allow(sr_d.base.ulp_bitmap, IPPROTO_UDP);
+
+	fm_init_ipv6(&fm, &expect);
+	push_srh_1sid(&fm, &expect);
+	*fm.prev_next = IPPROTO_ICMPV6;
+
+	assert_int_equal(ip6_parse_to_srh(&fm.mbuf, &info), 0);
+	assert_int_equal(process_behav_end(&fm.mbuf, &sr_d, &info), NOT_ALLOWED_UPPER);
+	assert_int_equal(ip6_local_mbuf_data(&fm.mbuf)->ext_offset, info.ext_offset);
+}
+
+// An empty allow-list means the default one: ICMPv6 only.
+static void srv6_ulp_normalize_default(void **) {
+	struct gr_nexthop_info_srv6_local sr6 = {0};
+
+	gr_srv6_ulp_normalize(sr6.ulp_bitmap);
+	assert_true(gr_srv6_ulp_allowed(sr6.ulp_bitmap, IPPROTO_ICMPV6));
+	assert_false(gr_srv6_ulp_allowed(sr6.ulp_bitmap, IPPROTO_UDP));
+}
+
+// Normalizing an explicit allow-list must not add ICMPv6 to it.
+static void srv6_ulp_normalize_explicit(void **) {
+	struct gr_nexthop_info_srv6_local sr6 = {0};
+
+	gr_srv6_ulp_allow(sr6.ulp_bitmap, IPPROTO_UDP);
+	gr_srv6_ulp_normalize(sr6.ulp_bitmap);
+	assert_true(gr_srv6_ulp_allowed(sr6.ulp_bitmap, IPPROTO_UDP));
+	assert_false(gr_srv6_ulp_allowed(sr6.ulp_bitmap, IPPROTO_ICMPV6));
 }
 
 // An End.DT6 SID receiving an IPv4 packet reports the upper layer error too.
@@ -1087,7 +1148,11 @@ static void srv6_end_dt4_transit(void **) {
 // FIB table, including when the packet is delivered to a local upper layer.
 static void srv6_end_t_local_delivery_vrf(void **) {
 	struct nexthop_info_srv6_local sr_d = {
-		.base = {.behavior = SR_BEHAVIOR_END_T, .out_vrf_id = 3},
+		.base = {
+			.behavior = SR_BEHAVIOR_END_T,
+			.out_vrf_id = 3,
+			.ulp_bitmap = GR_SRV6_ULP_DEFAULT_BITMAP,
+		},
 	};
 	struct iface vrf_iface = {.id = 3, .vrf_id = 3};
 	struct ip6_info info = {0}, expect;
@@ -1382,6 +1447,7 @@ static void srv6_end_x_next_csid_last(void **) {
 			// node + function: consumes the whole 32 bit CSID,
 			// leaving a zero argument.
 			.csid_bits = 32,
+			.ulp_bitmap = GR_SRV6_ULP_DEFAULT_BITMAP,
 		},
 		.l3_nh = &l3_nh,
 	};
@@ -1409,6 +1475,7 @@ static void srv6_end_next_csid_last(void **) {
 			.flags = GR_SR_FL_FLAVOR_NEXT_CSID,
 			.block_bits = 32,
 			.csid_bits = 32,
+			.ulp_bitmap = GR_SRV6_ULP_DEFAULT_BITMAP,
 		},
 	};
 	struct rte_ipv6_addr da = CSID_CONTAINER;
@@ -1458,6 +1525,10 @@ int main(void) {
 		cmocka_unit_test(srv6_parse_payload_len_underflow),
 		cmocka_unit_test(srv6_end_not_allowed_upper),
 		cmocka_unit_test(srv6_end_no_usp),
+		cmocka_unit_test(srv6_end_ulp_allowed),
+		cmocka_unit_test(srv6_end_ulp_without_icmpv6),
+		cmocka_unit_test(srv6_ulp_normalize_default),
+		cmocka_unit_test(srv6_ulp_normalize_explicit),
 		cmocka_unit_test(srv6_end_dt6_unexpected_upper),
 		cmocka_unit_test(srv6_end_dt4_transit),
 		cmocka_unit_test(srv6_end_t_local_delivery_vrf),

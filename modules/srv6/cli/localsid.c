@@ -48,6 +48,25 @@ static int str_to_behavior(const char *str, gr_srv6_behavior_t *behavior) {
 	return errno_set(EINVAL);
 }
 
+static struct {
+	uint8_t proto;
+	const char *name;
+} ulps[] = {
+	{IPPROTO_ICMPV6, "icmpv6"},
+	{IPPROTO_UDP, "udp"},
+	{IPPROTO_TCP, "tcp"},
+};
+
+static int str_to_ulp(const char *str, uint8_t *proto) {
+	for (unsigned i = 0; i < ARRAY_DIM(ulps); i++) {
+		if (strcmp(str, ulps[i].name) == 0) {
+			*proto = ulps[i].proto;
+			return 0;
+		}
+	}
+	return errno_set(EINVAL);
+}
+
 static cmd_status_t srv6_localsid_add(struct gr_api_client *c, const struct ec_pnode *p) {
 	struct gr_nexthop_info_srv6_local *sr6;
 	struct gr_nh_add_req *req = NULL;
@@ -95,6 +114,17 @@ static cmd_status_t srv6_localsid_add(struct gr_api_client *c, const struct ec_p
 			goto out;
 	}
 
+	n = ec_pnode_find(p, "ULPS");
+	if (n != NULL) {
+		v = ec_pnode_get_strvec(n);
+		for (i = 0; i < ec_strvec_len(v); i++) {
+			uint8_t proto;
+			if (str_to_ulp(ec_strvec_val(v, i), &proto) < 0)
+				goto out;
+			gr_srv6_ulp_allow(sr6->ulp_bitmap, proto);
+		}
+	}
+
 	n = ec_pnode_find(p, "BEHAVIOR");
 	if (n == NULL || ec_pnode_len(n) < 1)
 		goto out;
@@ -135,10 +165,44 @@ err:
 	return;
 }
 
+static const char *ulp_name(uint8_t proto) {
+	for (unsigned i = 0; i < ARRAY_DIM(ulps); i++)
+		if (ulps[i].proto == proto)
+			return ulps[i].name;
+	return NULL;
+}
+
+// Named upper layers first, in the order the CLI names them, then the ones that
+// were set through the API with a protocol the CLI does not name.
+static void
+srv6_local_format_ulps(char *buf, size_t len, const struct gr_nexthop_info_srv6_local *sr6) {
+	ssize_t n = 0;
+
+	buf[0] = 0;
+	for (unsigned i = 0; i < ARRAY_DIM(ulps); i++) {
+		if (!gr_srv6_ulp_allowed(sr6->ulp_bitmap, ulps[i].proto))
+			continue;
+		if (n > 0)
+			SAFE_BUF(snprintf, len, " ");
+		SAFE_BUF(snprintf, len, "%s", ulps[i].name);
+	}
+	for (unsigned proto = 0; proto < 256; proto++) {
+		if (ulp_name((uint8_t)proto) != NULL
+		    || !gr_srv6_ulp_allowed(sr6->ulp_bitmap, (uint8_t)proto))
+			continue;
+		if (n > 0)
+			SAFE_BUF(snprintf, len, " ");
+		SAFE_BUF(snprintf, len, "%u", proto);
+	}
+err:
+	return;
+}
+
 static void add_columns_srv6_local(struct gr_table *table) {
 	gr_table_column(table, "BEHAVIOR", GR_DISP_LEFT);
 	gr_table_column(table, "ENDX_ADDR", GR_DISP_LEFT);
 	gr_table_column(table, "FLAVOR", GR_DISP_STR_ARRAY);
+	gr_table_column(table, "ULP", GR_DISP_STR_ARRAY);
 	gr_table_column(table, "BLOCK_BITS", GR_DISP_LEFT | GR_DISP_INT);
 	gr_table_column(table, "CSID_BITS", GR_DISP_LEFT | GR_DISP_INT);
 	gr_table_column(table, "OUT_VRF", GR_DISP_LEFT);
@@ -148,7 +212,7 @@ static void add_columns_srv6_local(struct gr_table *table) {
 
 static void fill_table_srv6_local(struct gr_table *table, unsigned start_col, const void *info) {
 	const struct gr_nexthop_info_srv6_local *sr6 = info;
-	char flavors[64];
+	char ulps[128], flavors[64];
 
 	gr_table_cell(table, start_col, "%s", gr_srv6_behavior_name(sr6->behavior));
 	if (sr6->behavior == SR_BEHAVIOR_END_X)
@@ -158,19 +222,22 @@ static void fill_table_srv6_local(struct gr_table *table, unsigned start_col, co
 		gr_table_cell(table, start_col + 2, "%s", flavors);
 	else if (sr6->behavior == SR_BEHAVIOR_END || sr6->behavior == SR_BEHAVIOR_END_T)
 		gr_table_cell(table, start_col + 2, "none");
+	srv6_local_format_ulps(ulps, sizeof(ulps), sr6);
+	if (ulps[0])
+		gr_table_cell(table, start_col + 3, "%s", ulps);
 	if (sr6->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
-		gr_table_cell(table, start_col + 3, "%u", sr6->block_bits);
-		gr_table_cell(table, start_col + 4, "%u", sr6->csid_bits);
+		gr_table_cell(table, start_col + 4, "%u", sr6->block_bits);
+		gr_table_cell(table, start_col + 5, "%u", sr6->csid_bits);
 	}
 	if (sr6->out_vrf_id != GR_VRF_ID_UNDEF)
-		gr_table_cell(table, start_col + 5, "%d", sr6->out_vrf_id);
-	gr_table_cell(table, start_col + 6, "%lu", sr6->stats.packets);
-	gr_table_cell(table, start_col + 7, "%lu", sr6->stats.bytes);
+		gr_table_cell(table, start_col + 6, "%d", sr6->out_vrf_id);
+	gr_table_cell(table, start_col + 7, "%lu", sr6->stats.packets);
+	gr_table_cell(table, start_col + 8, "%lu", sr6->stats.bytes);
 }
 
 static void fill_object_srv6_local(struct gr_object *o, const void *info) {
 	const struct gr_nexthop_info_srv6_local *sr6 = info;
-	char flavors[64];
+	char ulps[128], flavors[64];
 
 	gr_object_field(o, "behavior", 0, "%s", gr_srv6_behavior_name(sr6->behavior));
 	if (sr6->behavior == SR_BEHAVIOR_END_X)
@@ -178,6 +245,9 @@ static void fill_object_srv6_local(struct gr_object *o, const void *info) {
 	srv6_local_format_flavors(flavors, sizeof(flavors), sr6->flags);
 	if (flavors[0])
 		gr_object_field(o, "flavor", GR_DISP_STR_ARRAY, "%s", flavors);
+	srv6_local_format_ulps(ulps, sizeof(ulps), sr6);
+	if (ulps[0])
+		gr_object_field(o, "ulp", GR_DISP_STR_ARRAY, "%s", ulps);
 	if (sr6->flags & GR_SR_FL_FLAVOR_NEXT_CSID) {
 		gr_object_field(o, "block_bits", GR_DISP_INT, "%u", sr6->block_bits);
 		gr_object_field(o, "csid_bits", GR_DISP_INT, "%u", sr6->csid_bits);
@@ -197,9 +267,18 @@ static struct cli_nexthop_formatter srv6_local_formatter = {
 };
 
 static int ctx_init(struct ec_node *root) {
-	struct ec_node *beh_node, *flavor_node;
+	struct ec_node *beh_node, *flavor_node, *ulp_node;
 	int ret;
 
+	ulp_node = EC_NODE_CMD(
+		"ULPS",
+		"(icmpv6,udp,tcp)",
+		with_help("ICMPv6 (default).", ec_node_str("icmpv6", "icmpv6")),
+		with_help("UDP.", ec_node_str("udp", "udp")),
+		with_help("TCP.", ec_node_str("tcp", "tcp"))
+	);
+	if (ulp_node == NULL)
+		return -1;
 	flavor_node = EC_NODE_CMD(
 		"FLAVORS",
 		"(psp,usp,usd,next-csid)",
@@ -214,7 +293,8 @@ static int ctx_init(struct ec_node *root) {
 		"BEHAVIOR",
 		EC_NODE_CMD(
 			EC_NO_ID,
-			"end [(flavor FLAVORS),(block-bits BLOCK_BITS),(csid-bits CSID_BITS)]",
+			"end [(flavor FLAVORS),(block-bits BLOCK_BITS),(csid-bits CSID_BITS),"
+			"(ulp ULPS)]",
 			with_help("Transit endpoint.", ec_node_str("end", "end")),
 			with_help("Endpoint flavor(s).", ec_node_clone(flavor_node)),
 			with_help(
@@ -224,12 +304,13 @@ static int ctx_init(struct ec_node *root) {
 			with_help(
 				"Compressed SID length in bits.",
 				ec_node_uint("CSID_BITS", 8, 64, 10)
-			)
+			),
+			with_help("Upper layer(s) delivered locally.", ec_node_clone(ulp_node))
 		),
 		EC_NODE_CMD(
 			EC_NO_ID,
 			"end.x nexthop ADDR iface IFACE [(flavor FLAVORS),(block-bits "
-			"BLOCK_BITS),(csid-bits CSID_BITS)]",
+			"BLOCK_BITS),(csid-bits CSID_BITS),(ulp ULPS)]",
 			with_help(
 				"Endpoint with Layer-3 cross-connect.",
 				ec_node_str("end.x", "end.x")
@@ -247,12 +328,13 @@ static int ctx_init(struct ec_node *root) {
 			with_help(
 				"Compressed SID length in bits.",
 				ec_node_uint("CSID_BITS", 8, 64, 10)
-			)
+			),
+			with_help("Upper layer(s) delivered locally.", ec_node_clone(ulp_node))
 		),
 		EC_NODE_CMD(
 			EC_NO_ID,
-			"end.t [(flavor FLAVORS),(block-bits BLOCK_BITS),(csid-bits CSID_BITS)]"
-			" table TABLE",
+			"end.t [(flavor FLAVORS),(block-bits BLOCK_BITS),(csid-bits CSID_BITS),"
+			"(ulp ULPS)] table TABLE",
 			with_help(
 				"L3 routing domain name.",
 				ec_node_dyn("TABLE", complete_vrf_names, NULL)
@@ -269,11 +351,12 @@ static int ctx_init(struct ec_node *root) {
 			with_help(
 				"Compressed SID length in bits.",
 				ec_node_uint("CSID_BITS", 8, 64, 10)
-			)
+			),
+			with_help("Upper layer(s) delivered locally.", ec_node_clone(ulp_node))
 		),
 		EC_NODE_CMD(
 			EC_NO_ID,
-			"(end.dt4|end.dt6|end.dt46) [table TABLE]",
+			"(end.dt4|end.dt6|end.dt46) [table TABLE][ulp ULPS]",
 			with_help(
 				"L3 routing domain name.",
 				ec_node_dyn("TABLE", complete_vrf_names, NULL)
@@ -289,7 +372,8 @@ static int ctx_init(struct ec_node *root) {
 			with_help(
 				"Endpoint with decapsulation and specific IPv4/IPv6 table lookup.",
 				ec_node_str("end.dt46", "end.dt46")
-			)
+			),
+			with_help("Upper layer(s) delivered locally.", ec_node_clone(ulp_node))
 		)
 	);
 	if (beh_node == NULL)

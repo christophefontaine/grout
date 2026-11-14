@@ -17,17 +17,19 @@ LOG_TYPE("srv6");
 
 static struct rte_hash *srv6_local_hash;
 
-// Hash key for SRv6 local nexthop lookup (26 bytes).
-// Includes all fields checked during lookup.
+// Hash key for SRv6 local nexthop lookup. Includes all fields checked during
+// lookup: the configuration of the SID plus its interface.
 struct srv6_local_key {
 	BASE(gr_nexthop_info_srv6_local);
 	uint16_t iface_id;
 };
 
-// Fill in the NEXT-CSID default lengths. Both the lookup and the import path
-// call it, so that a second API call that omits the defaults finds the nexthop
-// it already created instead of computing a different key.
+// Fill in the NEXT-CSID default lengths and the default upper-layer allow-list.
+// Both the lookup and the import path call it, so that a second API call that
+// omits the defaults finds the nexthop it already created instead of computing
+// a different key.
 static void srv6_local_info_normalize(struct gr_nexthop_info_srv6_local *pub) {
+	gr_srv6_ulp_normalize(pub->ulp_bitmap);
 	if (!(pub->flags & GR_SR_FL_FLAVOR_NEXT_CSID))
 		return;
 	pub->block_bits = pub->block_bits == 0 ? 32 : pub->block_bits;
@@ -49,6 +51,7 @@ static inline void set_srv6_local_key(
 	key->base.flags = info->flags;
 	key->base.block_bits = info->block_bits;
 	key->base.csid_bits = info->csid_bits;
+	memcpy(key->base.ulp_bitmap, info->ulp_bitmap, sizeof(key->base.ulp_bitmap));
 	key->base.endx_addr = info->endx_addr;
 	key->iface_id = iface_id;
 }
@@ -90,7 +93,8 @@ static bool srv6_local_nh_equal(const struct nexthop *a, const struct nexthop *b
 
 	if (ad->behavior != bd->behavior || ad->out_vrf_id != bd->out_vrf_id
 	    || ad->flags != bd->flags || ad->block_bits != bd->block_bits
-	    || ad->csid_bits != bd->csid_bits)
+	    || ad->csid_bits != bd->csid_bits
+	    || memcmp(ad->ulp_bitmap, bd->ulp_bitmap, sizeof(ad->ulp_bitmap)) != 0)
 		return false;
 
 	if (!rte_ipv6_addr_eq(&ad->endx_addr, &bd->endx_addr))
@@ -112,11 +116,34 @@ static struct nexthop *srv6_local_nh_lookup(const struct gr_nexthop_base *base, 
 	return nh;
 }
 
+// An allow-list only makes sense for real upper layers: an extension header is
+// walked by find_upper_layer() and never reaches the SID's upper-layer
+// processing.
+static bool srv6_ulp_bitmap_valid(const uint8_t bitmap[GR_SRV6_ULP_BITMAP_LEN]) {
+	static const uint8_t not_ulp[] = {
+		IPPROTO_HOPOPTS,
+		IPPROTO_ROUTING,
+		IPPROTO_FRAGMENT,
+		IPPROTO_AH,
+		IPPROTO_DSTOPTS,
+		IPPROTO_NONE,
+	};
+
+	for (unsigned i = 0; i < ARRAY_DIM(not_ulp); i++)
+		if (gr_srv6_ulp_allowed(bitmap, not_ulp[i]))
+			return false;
+
+	return true;
+}
+
 static int srv6_local_nh_import_info(struct nexthop *nh, const void *info) {
 	struct gr_nexthop_info_srv6_local pub = *(const struct gr_nexthop_info_srv6_local *)info;
 	struct nexthop_info_srv6_local *priv = nexthop_info_srv6_local(nh);
 	struct nexthop *l3_nh = NULL;
 	bool l3_nh_created = false;
+
+	if (!srv6_ulp_bitmap_valid(pub.ulp_bitmap))
+		return errno_set(EINVAL);
 
 	srv6_local_info_normalize(&pub);
 
