@@ -29,6 +29,19 @@ static const struct {
 	{GR_SR_FL_FLAVOR_NEXT_CSID, ZEBRA_SEG6_LOCAL_FLV_OP_NEXT_CSID},
 };
 
+// Reject flavors that grout cannot honour instead of silently installing them as
+// a plain End SID (RFC 9800 section 4.2, e.g. REPLACE-CSID).
+static bool srv6_local_flavors_check(uint32_t flv) {
+	uint32_t supported = 0;
+
+	for (unsigned i = 0; i < ARRAY_DIM(srv6_flavors); i++)
+		supported |= 1u << srv6_flavors[i].frr_op;
+	if ((flv & ~supported) == 0)
+		return true;
+	gr_log_err("unsupported seg6local flavors 0x%x", flv & ~supported);
+	return false;
+}
+
 static inline bool is_selfroute(gr_nh_origin_t origin) {
 	switch (origin) {
 	case GR_NH_ORIGIN_ZEBRA:
@@ -859,6 +872,8 @@ grout_add_nexthop(uint32_t nh_id, gr_nh_origin_t origin, const struct nexthop *n
 
 		uint32_t flv = nh->nh_srv6->seg6local_ctx.flv.flv_ops;
 
+		if (!srv6_local_flavors_check(flv))
+			goto out;
 		for (unsigned i = 0; i < ARRAY_DIM(srv6_flavors); i++)
 			if (CHECK_SRV6_FLV_OP(flv, srv6_flavors[i].frr_op))
 				sr6_local->flags |= srv6_flavors[i].flag;
