@@ -131,30 +131,33 @@ assert_nexthop "$nh_id" '.block_bits == 32'
 csid_bits=$(grcli -j nexthop show id "$nh_id" | jq -re .csid_bits)
 case "$csid_bits" in
 16)
-	# 5f00:100:0:1:: shifts to 5f00:100:1::
+	# 5f00:100:0:1:: shifts to 5f00:100:1:: and the shifted destination
+	# is handed to the adjacency. The shifted destination differs from
+	# the ping destination, so seeing it in the peer namespace proves
+	# that the L3 nexthop was used.
+	expected=forward
 	shifted_dst=5f00:100:1::
+	capture_filter="ip6 dst $shifted_dst"
 	;;
 32)
-	# the last CSID is consumed, only the block remains
-	shifted_dst=5f00:100::
+	# The container holds a single CSID: its argument is zero, so the
+	# packet falls through to the plain End.X behavior with the
+	# destination address left untouched (RFC 9800 section 4.1.1, N09).
+	# With no SRH, the ping is delivered locally and grout replies.
+	expected=local
+	capture_filter="icmp6 and ip6[40] == 129"
 	;;
 *)
 	fail "unexpected csid_bits=$csid_bits, expected 16 or 32"
 	;;
 esac
 
-# The locator uses uSID, so the adjacency SID is a uA: grout consumes the
-# active CSID and hands the packet to the peer over the adjacency instead
-# of looking the result up. The consumed CSID width depends on csid_bits,
-# so the shifted destination differs between FRR versions. Either way it
-# is distinct from the ping destination, so the packet only reaches the peer
-# if the L3 nexthop is really used.
 ip -n isis-peer -6 route add 5f00:100::/48 via 2001:db8:1::1 dev x-p0
 
 # Start the capture before the traffic. ping6 -i0.2 -c5 is done emitting after
 # 0.8s, which tcpdump may not beat to opening its capture.
 capture=$(mktemp)
-ip netns exec isis-peer timeout 5 tcpdump -c1 -pnnli x-p0 ip6 dst "$shifted_dst" >"$capture" 2>&1 &
+ip netns exec isis-peer timeout 5 tcpdump -c1 -pnnli x-p0 $capture_filter >"$capture" 2>&1 &
 tcpdump_pid=$!
 for _ in $(seq 50); do
 	if grep -q "listening on" "$capture"; then
@@ -171,6 +174,9 @@ if ! wait $tcpdump_pid; then
 	rm -f "$capture"
 	wait $ping_pid
 	grcli trace show count 20
+	if [ "$expected" = local ]; then
+		fail "END.X did not process the last CSID locally"
+	fi
 	fail "END.X did not forward the packet to the adjacency"
 fi
 rm -f "$capture"
